@@ -1,0 +1,7 @@
+# Пример описания источников без учётных данных и реальных путей.
+sources:
+  - id: sample_transactions
+    kind: csv
+    location: data/sample/transactions.csv
+    purpose: synthetic_test_fixture
+    # TODO: определить схему, ключи, кодировку и правила доступа.

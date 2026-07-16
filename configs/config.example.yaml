@@ -1,0 +1,10 @@
+# Пример будущей конфигурации приложения. Значения и схема будут уточнены.
+environment: development
+paths:
+  rules: rules
+  knowledge: knowledge
+  outputs: outputs
+evidence:
+  backend: filesystem
+report:
+  template: templates/report.md.j2
