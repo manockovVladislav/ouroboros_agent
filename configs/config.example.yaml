@@ -1,10 +1,25 @@
-# Пример будущей конфигурации приложения. Значения и схема будут уточнены.
+version: 1
 environment: development
-paths:
-  rules: rules
-  knowledge: knowledge
-  outputs: outputs
-evidence:
-  backend: filesystem
-report:
-  template: templates/report.md.j2
+
+# Общее место для локальных и удалённых embedding-моделей.
+embedding:
+  provider: sentence_transformers
+  model: /home/vladislav/models/bge-m3
+  device: null
+  batch_size: 16
+
+qdrant:
+  # Если url не задан, используется локальное хранилище path.
+  url: null
+  path: .audit_insight/qdrant
+  collection: audit_knowledge
+  api_key_env: QDRANT_API_KEY
+
+storage:
+  duckdb_path: .audit_insight/audit.duckdb
+
+chunking:
+  size: 1200
+  overlap: 200
+
+ingestion_output: outputs/ingestion-result.json

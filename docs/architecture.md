@@ -21,6 +21,14 @@ Evidence → AuditFinding → отчёт
 - Ouroboros работает только через allowlist функций `ouroboros_tools.py`.
 - CLI и Ouroboros используют одно ядро без дублирования бизнес-логики.
 
-## Отложенные решения
+## Универсальный ingestion/RAG
 
-До реализации необходимо выбрать библиотеки моделей, таблиц, SQL, CLI, шаблонов и RAG, а также форматы хранения индекса и доказательств.
+```text
+YAML registry
+   ├── table source → pandas reader → DuckDB → DataProfile
+   └── document source → text extraction → chunks → BGE-M3 → Qdrant
+```
+
+Форматы, пути, ожидаемые поля, ключи и метаданные задаются конфигурацией.
+Специализированные пакеты проверок используют зарегистрированные таблицы и
+результаты поиска, но не меняют ingestion-ядро.

@@ -1,4 +1,17 @@
-"""Публичная граница пакета Audit Insight Agent.
+"""Public boundary of Audit Insight Agent."""
 
-TODO: экспортировать только стабильные модели и фасады после их реализации.
-"""
+from .config import load_application_settings, load_source_catalog
+from .data_loader import DuckDBTableStore
+from .ingestion import ingest_catalog
+from .models import DataProfile, DocumentChunk, IngestionResult, SourceConfig
+
+__all__ = [
+    "DataProfile",
+    "DocumentChunk",
+    "DuckDBTableStore",
+    "IngestionResult",
+    "SourceConfig",
+    "ingest_catalog",
+    "load_application_settings",
+    "load_source_catalog",
+]

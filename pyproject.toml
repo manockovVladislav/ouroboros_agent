@@ -1,18 +1,33 @@
 [build-system]
-# TODO: выбрать backend сборки при переходе к реализации.
-requires = []
-build-backend = ""
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
 
 [project]
 name = "audit-insight-agent"
-version = "0.0.0"
-description = "Каркас автономного аудиторского ядра для Ouroboros"
+version = "0.1.0"
+description = "Универсальное аудиторское ядро с DuckDB и RAG"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "beautifulsoup4>=4.12,<5",
+    "duckdb>=1.1,<2",
+    "openpyxl>=3.1,<4",
+    "pandas>=2.2,<4",
+    "pyarrow>=18,<24",
+    "pydantic>=2.9,<3",
+    "pypdf>=5,<7",
+    "python-docx>=1.1,<2",
+    "PyYAML>=6,<7",
+    "qdrant-client>=1.12,<2",
+    "sentence-transformers>=3.3,<6",
+]
 
-# TODO: после реализации CLI зарегистрировать entry point audit-insight.
-# [project.scripts]
-# audit-insight = "audit_insight_agent.cli:main"
+[project.scripts]
+audit-insight = "audit_insight_agent.cli:main"
 
-# TODO: добавить настройки линтера, форматтера, type checker и test runner.
+[tool.hatch.build.targets.wheel]
+packages = ["src/audit_insight_agent"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

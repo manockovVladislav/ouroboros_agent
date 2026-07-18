@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -50,6 +50,153 @@ class DataSource(BaseModel):
     relative_path: str
     file_format: str
     size_bytes: int
+
+
+class SourceConfig(BaseModel):
+    """Declarative description of a source available to the ingestion core."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_.-]+$")
+    source_type: Literal["table", "document"]
+    location: str = Field(min_length=1)
+    format: str = "auto"
+    enabled: bool = True
+    table_name: str | None = None
+    expected_fields: list[str] = Field(default_factory=list)
+    primary_key: list[str] = Field(default_factory=list)
+    encoding: str = "utf-8"
+    options: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourceCatalog(BaseModel):
+    """Validated contents of a source registry YAML file."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = 1
+    sources: list[SourceConfig]
+
+    @model_validator(mode="after")
+    def source_ids_are_unique(self) -> SourceCatalog:
+        source_ids = [source.source_id for source in self.sources]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("source_id values must be unique")
+        return self
+
+
+class EmbeddingSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["sentence_transformers"] = "sentence_transformers"
+    model: str = "BAAI/bge-m3"
+    device: str | None = None
+    batch_size: int = Field(default=16, gt=0)
+
+
+class QdrantSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str | None = None
+    path: str = ".audit_insight/qdrant"
+    collection: str = "audit_knowledge"
+    api_key_env: str = "QDRANT_API_KEY"
+
+
+class StorageSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    duckdb_path: str = ".audit_insight/audit.duckdb"
+
+
+class ChunkingSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    size: int = Field(default=1200, gt=0)
+    overlap: int = Field(default=200, ge=0)
+
+    @model_validator(mode="after")
+    def overlap_is_smaller_than_size(self) -> ChunkingSettings:
+        if self.overlap >= self.size:
+            raise ValueError("chunking.overlap must be smaller than chunking.size")
+        return self
+
+
+class ApplicationSettings(BaseModel):
+    """Shared runtime settings for models and analytical storage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = 1
+    environment: str = "development"
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
+    storage: StorageSettings = Field(default_factory=StorageSettings)
+    chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
+    ingestion_output: str = "outputs/ingestion-result.json"
+
+
+class ColumnProfile(BaseModel):
+    """Reproducible structure and quality metrics for one column."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    data_type: str
+    null_count: int
+    null_ratio: float
+    distinct_count: int
+    min_value: Any | None = None
+    max_value: Any | None = None
+
+
+class DataProfile(BaseModel):
+    """Dataset-level profile created from a table registered in DuckDB."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_id: str
+    table_name: str
+    row_count: int
+    column_count: int
+    duplicate_row_count: int
+    primary_key_duplicate_count: int | None = None
+    missing_expected_fields: list[str] = Field(default_factory=list)
+    columns: list[ColumnProfile]
+
+
+class DocumentChunk(BaseModel):
+    """A searchable document fragment with traceable provenance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str
+    source_id: str
+    text: str
+    chunk_index: int
+    start_char: int
+    end_char: int
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchResult(BaseModel):
+    """A ranked document fragment returned by the knowledge index."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chunk: DocumentChunk
+    score: float
+
+
+class IngestionResult(BaseModel):
+    """Machine-readable summary of one configuration-driven ingestion run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    registered_tables: dict[str, str] = Field(default_factory=dict)
+    profiles: list[DataProfile] = Field(default_factory=list)
+    indexed_chunks: int = 0
 
 
 class EvidenceReference(BaseModel):
@@ -210,7 +357,4 @@ class AuditContext:
     run_id: str
     data_root: Path
     data_sources: tuple[DataSource, ...]
-
-
-
 

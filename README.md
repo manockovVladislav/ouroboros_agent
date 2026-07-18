@@ -1,6 +1,8 @@
 # Audit Insight Agent
 
-На текущем этапе репозиторий содержит только верхнеуровневую структуру, контракты модулей и план реализации. Исполняемая бизнес-логика намеренно не добавлена.
+Репозиторий содержит универсальное ядро загрузки и RAG, а также развиваемый
+контур аудиторских проверок. Ядро не зависит от названий файлов, портфелей,
+валют или структуры конкретного синтетического сценария.
 
 ## Назначение
 
@@ -140,10 +142,36 @@ Ouroboros не должен напрямую читать внутренние �
 ```
 
 
-## Планируемый CLI
+## Загрузка данных и построение RAG
+
+Источники регистрируются через YAML по схеме
+[configs/data_sources.example.yaml](configs/data_sources.example.yaml). Для
+таблиц задаются ожидаемые поля и ключи, для документов — произвольные
+метаданные поиска. Относительные пути считаются от каталога YAML-файла.
+
+Поддерживаются CSV, Excel, Parquet, JSON, PDF, DOCX, Markdown, TXT и HTML.
+Таблицы материализуются в DuckDB и автоматически профилируются. Документы
+разбиваются на стабильные фрагменты, кодируются `BAAI/bge-m3` и сохраняются в
+Qdrant. Ключ Qdrant передаётся только через `QDRANT_API_KEY`.
+
+Общие параметры моделей и хранилищ находятся в
+[configs/config.example.yaml](configs/config.example.yaml). Локальный
+`configs/config.yaml` (исключён из Git) уже указывает BGE-M3 по пути
+`/home/vladislav/models/bge-m3`. Другой конфиг выбирается через `--settings`.
 
 ```bash
-audit-insight profile
-audit-insight check
-audit-insight report
+python -m pip install -e .
+audit-insight ingest --config configs/data_sources.example.yaml
+audit-insight search "требования к учёту операций"
+```
+
+По умолчанию используются локальные файлы `.audit_insight/audit.duckdb` и
+`.audit_insight/qdrant`. Сервер Qdrant подключается флагом `--qdrant-url`.
+
+## CLI
+
+```bash
+audit-insight ingest --config configs/data_sources.example.yaml
+audit-insight search "поисковый запрос"
+audit-insight agent --data-dir data/sample
 ```

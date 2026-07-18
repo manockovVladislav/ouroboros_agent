@@ -1,4 +1,9 @@
-"""Будущая служебная команда построения индекса knowledge/documents.
+"""Compatibility wrapper for configuration-driven ingestion."""
+import sys
 
-TODO: загружать документы, формировать DocumentChunk и сохранять метаданные.
-"""
+from audit_insight_agent.cli import main
+
+
+if __name__ == "__main__":
+    sys.argv.insert(1, "ingest")
+    main()
