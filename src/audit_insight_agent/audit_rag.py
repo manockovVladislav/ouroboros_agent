@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import resolve_source_location
+from .finding_builder import review_findings_and_build_plan
 from .document_loader import DOCUMENT_FORMATS, load_document_chunks
 from .models import (
     AgentRunResult,
@@ -292,12 +293,18 @@ def ground_audit_with_documents(
         },
     }
     errors = [*result.execution_errors, *document_errors]
+    all_data_sources = [*result.data_sources, *document_descriptors]
+    finding_reviews, audit_plan = review_findings_and_build_plan(
+        grounded_findings, errors, all_data_sources
+    )
     grounded = result.model_copy(
         update={
             "findings": grounded_findings,
-            "data_sources": [*result.data_sources, *document_descriptors],
+            "data_sources": all_data_sources,
             "metrics": metrics,
             "execution_errors": errors,
+            "finding_reviews": finding_reviews,
+            "audit_plan": audit_plan,
             "status": RunStatus.COMPLETED_WITH_ERRORS if errors else result.status,
         }
     )

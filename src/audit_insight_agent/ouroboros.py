@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .config import load_application_settings
@@ -98,12 +99,50 @@ class OuroborosHTTPClient:
     def get_task(self, task_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/tasks/{task_id}")
 
+    def get_task_events(
+        self, task_id: str, cursor: int = 0, wait_seconds: int = 0
+    ) -> list[dict[str, Any]]:
+        query = urlencode({"cursor": max(0, cursor), "wait": max(0, wait_seconds)})
+        headers = {"Accept": "text/event-stream"}
+        if self.password:
+            headers["X-Ouroboros-Password"] = self.password
+        request = Request(
+            f"{self.base_url}/api/tasks/{task_id}/events?{query}",
+            headers=headers,
+            method="GET",
+        )
+        try:
+            with urlopen(request, timeout=max(10, wait_seconds + 5)) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")[:500]
+            raise OuroborosConnectionError(
+                f"Ouroboros events HTTP {error.code}: {detail}"
+            ) from error
+        except (URLError, TimeoutError) as error:
+            raise OuroborosConnectionError(
+                f"Ouroboros events недоступны: {error}"
+            ) from error
+        events = []
+        for line in body.splitlines():
+            if not line.startswith("data: "):
+                continue
+            try:
+                event = json.loads(line[6:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+        return events
+
 
 class OuroborosOrchestrator:
     """Runs Audit Insight through the external Ouroboros task gateway."""
 
     TERMINAL_STATUSES = {"completed", "failed", "cancelled", "error"}
     RUN_ID_PATTERN = re.compile(r"\bRUN-[A-Za-z0-9_.-]{1,76}\b")
+    CLARIFICATION_PREFIX = "AUDIT_CLARIFICATION_REQUIRED="
+    IMPROVEMENT_PREFIX = "AUDIT_IMPROVEMENT_NEEDED="
     logger = logging.getLogger("audit_insight.ouroboros")
 
     def __init__(
@@ -179,6 +218,8 @@ class OuroborosOrchestrator:
         }
         deadline = time.monotonic() + self.settings.ouroboros.timeout_seconds
         previous_status = ""
+        event_cursor = 0
+        previous_progress = ""
         while time.monotonic() < deadline:
             task = self.client.get_task(task_id)
             status = str(task.get("status") or "unknown").lower()
@@ -198,6 +239,20 @@ class OuroborosOrchestrator:
                     "message": f"Ouroboros: **{status}** (`{task_id}`)",
                 }
                 previous_status = status
+            event_reader = getattr(self.client, "get_task_events", None)
+            if callable(event_reader):
+                try:
+                    task_events = event_reader(task_id, event_cursor, 0)
+                except OuroborosConnectionError:
+                    task_events = []
+                for task_event in task_events:
+                    event_cursor = max(
+                        event_cursor, int(task_event.get("seq") or 0)
+                    )
+                    progress = self._meaningful_progress(task_event)
+                    if progress and progress != previous_progress:
+                        yield {"kind": "status", "message": progress}
+                        previous_progress = progress
             if status in self.TERMINAL_STATUSES:
                 if status != "completed":
                     detail = task.get("error") or task.get("result") or "без описания"
@@ -209,9 +264,35 @@ class OuroborosOrchestrator:
                     )
                     raise RuntimeError(f"Задача Ouroboros завершилась как {status}: {detail}")
                 task_result = task.get("result")
+                clarification = self._protocol_value(
+                    task_result, self.CLARIFICATION_PREFIX
+                )
+                if clarification:
+                    question = (
+                        str(clarification.get("question") or "").strip()
+                        if isinstance(clarification, dict)
+                        else str(clarification).strip()
+                    )
+                    if not question:
+                        raise RuntimeError("Ouroboros вернул пустой вопрос")
+                    yield {
+                        "kind": "clarification",
+                        "question": question,
+                        "task_id": task_id,
+                    }
+                    return
                 run_id = self._extract_run_id(task_result)
                 result = self.result_loader(run_id)
                 result["ouroboros_answer"] = self._extract_auditor_answer(task_result)
+                improvement = self._protocol_value(
+                    task_result, self.IMPROVEMENT_PREFIX
+                )
+                result["improvement_needed"] = bool(improvement)
+                result["improvement_reason"] = (
+                    str(improvement.get("reason") or "").strip()
+                    if isinstance(improvement, dict)
+                    else ""
+                )
                 run_dir = Path(result["candidate_findings_path"]).parent
                 result["evaluation"] = run_external_evaluator(
                     case_name=case_name,
@@ -250,6 +331,7 @@ class OuroborosOrchestrator:
         request_root = PROJECT_ROOT / "outputs" / "requests"
         request_root.mkdir(parents=True, exist_ok=True)
         path = request_root / f"REQ-{uuid.uuid4().hex}.json"
+        replica_name = self._replica_from_query(user_request)
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(
             json.dumps(
@@ -258,6 +340,7 @@ class OuroborosOrchestrator:
                     "created_at": utc_now(),
                     "case_name": case_name,
                     "auditor_query": user_request,
+                    "replica_name": replica_name,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -266,6 +349,22 @@ class OuroborosOrchestrator:
         )
         temporary.replace(path)
         return path
+
+    def _replica_from_query(self, user_request: str) -> str | None:
+        matches = [
+            alias
+            for alias in self.settings.databases.connections
+            if re.search(
+                rf"(?<![\w.-]){re.escape(alias)}(?![\w.-])",
+                user_request,
+                re.IGNORECASE,
+            )
+        ]
+        if len(matches) > 1:
+            raise ValueError(
+                "В запросе указано несколько реплик: " + ", ".join(matches)
+            )
+        return matches[0] if matches else None
 
     def _task_prompt(self, request_path: Path) -> str:
         workspace = Path(self.settings.ouroboros.workspace).expanduser().resolve()
@@ -279,13 +378,31 @@ class OuroborosOrchestrator:
             "--request",
             str(relative_request),
         ]
-        return f"""Ты выступаешь как аудитор и оркестратор Audit Insight Agent.
+        request_payload = json.loads(request_path.read_text(encoding="utf-8"))
+        selected_replica = request_payload.get("replica_name") or "не указана"
+        clarification_enabled = self.settings.self_improvement.allow_blocking_clarification
+        return f"""Ты выступаешь как аудитор и главный оркестратор Audit Insight Agent.
 Это боевой запуск: не изменяй код, правила, конфигурацию и evaluator.
+Снача изучи описания источников, имена файлов, схемы и документы knowledge.
+Не задавай вопросы о формате отчёта, методе или несущественных деталях: прими разумное
+допущение и продолжай. Один вопрос разрешён только до расчётов, если назначение данных нельзя установить
+и ошибочная трактовка изменит смысл аудита. Вопросы разрешены: {str(clarification_enabled).lower()}.
+Точно названная в запросе зарегистрированная реплика: {selected_replica}.
+В этом крайнем случае не запускай расчёты и верни одну последнюю строку:
+AUDIT_CLARIFICATION_REQUIRED={{"question":"один конкретный вопрос","reason":"почему без ответа нельзя"}}
+
 Выполни команду в workspace точно с таким argv:
 {json.dumps(command, ensure_ascii=False)}
 Команда запустит табличные правила, RAG по документам и создаст evidence, candidate_findings.json и report.md.
 После запуска прочитай только созданные report.md и candidate_findings.json.
-Дай краткий аудиторский вывод, основанный только на этих артефактах.
+Дай краткий аудиторский вывод только после раздела Evidence critique. Не выдавай POTENTIAL_RISK за
+найденное нарушение. Для каждого CONFIRMED укажи, что найдено, в какой таблице/документе и какой
+факт это подтверждает. Затем кратко изложи ранжированный Prioritized audit plan. Опирайся только на эти артефакты.
+Отдельно оцени, не помешал ли
+системный пробел в общем коде, правилах, RAG или промптах. Не считай пробелом отсутствие нарушений или
+нехватку данных. Если общая возможность реального аудита отсутствовала, добавь строку:
+AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общего пробела"}}
+Иначе добавь AUDIT_IMPROVEMENT_NEEDED=false.
 Последняя строка ответа обязана иметь вид AUDIT_RUN_ID=<run_id>.
 Не придумывай факты, run_id и не читай закрытый ground truth."""
 
@@ -296,7 +413,55 @@ class OuroborosOrchestrator:
             if isinstance(task_result, dict)
             else str(task_result or "")
         )
-        return re.sub(r"(?m)^AUDIT_RUN_ID=.*$", "", text).strip()
+        return re.sub(
+            r"(?m)^AUDIT_(?:RUN_ID|IMPROVEMENT_NEEDED|CLARIFICATION_REQUIRED)=.*$",
+            "",
+            text,
+        ).strip()
+
+    @staticmethod
+    def _protocol_value(task_result: Any, prefix: str) -> Any:
+        text = (
+            json.dumps(task_result, ensure_ascii=False)
+            if isinstance(task_result, dict)
+            else str(task_result or "")
+        )
+        for line in text.splitlines():
+            if not line.strip().startswith(prefix):
+                continue
+            raw = line.strip()[len(prefix) :].strip()
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return raw
+        return None
+
+    @staticmethod
+    def _meaningful_progress(event: dict[str, Any]) -> str:
+        event_type = str(event.get("type") or "")
+        data = event.get("data") if isinstance(event.get("data"), dict) else {}
+        if event_type == "tool_call":
+            tool = str(data.get("tool") or data.get("name") or "").strip()
+            labels = {
+                "run_shell": "Запускаю аудиторские расчёты…",
+                "read_file": "Изучаю структуру данных и документы…",
+                "list_files": "Определяю доступные источники…",
+            }
+            if tool:
+                return labels.get(tool, f"Ouroboros выполняет: `{tool}`…")
+        if event_type in {"progress", "message"}:
+            value = next(
+                (
+                    str(data.get(key) or "").strip()
+                    for key in ("content", "message", "text")
+                    if str(data.get(key) or "").strip()
+                ),
+                "",
+            )
+            value = re.sub(r"\s+", " ", value)
+            if value and len(value) <= 240:
+                return value
+        return ""
 
     @classmethod
     def _extract_run_id(cls, task_result: Any) -> str:
@@ -336,21 +501,40 @@ class OuroborosOrchestrator:
     @staticmethod
     def _answer(result: dict[str, Any]) -> str:
         findings = result.get("findings", [])
-        severity_counts = Counter(item.get("severity", "UNKNOWN") for item in findings)
+        reviews = result.get("finding_reviews", [])
+        confirmed_ids = {
+            item.get("finding_id")
+            for item in reviews
+            if item.get("verdict") == "CONFIRMED"
+        }
+        confirmed = (
+            [item for item in findings if item.get("finding_id") in confirmed_ids]
+            if reviews
+            else findings
+        )
+        severity_counts = Counter(item.get("severity", "UNKNOWN") for item in confirmed)
         severity_text = ", ".join(
             f"{severity}: {count}"
             for severity, count in sorted(severity_counts.items())
         ) or "нет"
-        titles = [item.get("title", "Без названия") for item in findings[:5]]
+        titles = [item.get("title", "Без названия") for item in confirmed[:5]]
         lines = []
         if result.get("ouroboros_answer"):
             lines.extend([str(result["ouroboros_answer"]), "---"])
         lines.extend([
             f"Анализ завершён со статусом {result['status']}.",
-            f"Сформировано выводов: {len(findings)}; по критичности: {severity_text}.",
+            f"Подтверждённых выводов: {len(confirmed)}; по критичности: {severity_text}.",
         ])
         if titles:
-            lines.append("Основные выводы: " + "; ".join(titles) + ".")
+            lines.append("Подтверждёно: " + "; ".join(titles) + ".")
+        potential_count = sum(
+            item.get("status") == "POTENTIAL_RISK"
+            for item in result.get("audit_plan", [])
+        )
+        if potential_count:
+            lines.append(
+                f"Потенциальных направлений для дополнительной проверки: {potential_count}."
+            )
         errors = result.get("execution_errors", [])
         if errors:
             lines.append(f"Ошибок выполнения: {len(errors)}. Подробности сохранены в отчёте.")

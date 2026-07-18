@@ -5,8 +5,11 @@ import json
 from typing import Any
 
 from .models import (
+    AuditPlanItem,
     CandidateFinding,
+    DataSource,
     EvidenceReference,
+    FindingReview,
     Severity,
 )
 
@@ -134,3 +137,139 @@ def deduplicate_findings(
             finding.finding_id,
         ),
     )
+
+
+def review_findings_and_build_plan(
+    findings: list[CandidateFinding],
+    execution_errors: list[str],
+    data_sources: list[DataSource] | None = None,
+) -> tuple[list[FindingReview], list[AuditPlanItem]]:
+    """Challenge candidate findings and produce a ranked, source-specific plan."""
+
+    reviews: list[FindingReview] = []
+    plan: list[AuditPlanItem] = []
+    locations_by_source = {
+        item.source_id: item.relative_path for item in (data_sources or [])
+    }
+    for finding in findings:
+        table_evidence = [
+            item
+            for item in finding.evidence
+            if item.evidence_id and item.checksum and item.query
+        ]
+        sources = sorted(
+            {
+                source.strip()
+                for item in finding.evidence
+                for source in item.source_name.split(",")
+                if source.strip()
+            }
+        )
+        source_locations = sorted(
+            {
+                str(location)
+                for item in finding.evidence
+                for location in (
+                    (item.fields.get("metadata") or {}).get("location"),
+                    (item.fields.get("metadata") or {}).get("relative_path"),
+                )
+                if location
+            }
+            | {
+                locations_by_source[source]
+                for source in sources
+                if source in locations_by_source
+            }
+        )
+        limitations = []
+        limitations.append(
+            "Правило подтверждает отклонение, но не доказывает заявленную первопричину; "
+            "её нужно проверять отдельно."
+        )
+        if not source_locations:
+            limitations.append(
+                "Точный путь к нормативному документу не привязан."
+            )
+        if finding.confidence < 0.75:
+            limitations.append(
+                "Уровень уверенности ниже порога 0.75; сигнал требует проверки."
+            )
+        if not table_evidence:
+            verdict = "REJECTED"
+            rationale = (
+                "Вывод не прошёл критику: нет воспроизводимой строки результата "
+                "с checksum и SQL-запросом."
+            )
+        elif finding.confidence < 0.75:
+            verdict = "REQUIRES_VALIDATION"
+            rationale = (
+                "Воспроизводимый сигнал есть, но его нельзя выдавать за подтверждённое "
+                "нарушение без дополнительной проверки."
+            )
+        else:
+            verdict = "CONFIRMED"
+            rationale = (
+                "Вывод подтверждён воспроизводимым результатом правила, checksum и ссылкой "
+                "на объект источника."
+            )
+        reviews.append(
+            FindingReview(
+                finding_id=finding.finding_id,
+                verdict=verdict,
+                rationale=rationale,
+                evidence_checks=[
+                    f"Воспроизводимых табличных evidence: {len(table_evidence)}",
+                    f"Всего ссылок на evidence: {len(finding.evidence)}",
+                    f"Confidence: {finding.confidence:.2f}",
+                ],
+                limitations=limitations,
+                source_locations=source_locations,
+            )
+        )
+        if verdict == "REJECTED":
+            continue
+        plan.append(
+            AuditPlanItem(
+                plan_id="PLAN-" + hashlib.sha256(
+                    finding.finding_id.encode("utf-8")
+                ).hexdigest()[:12].upper(),
+                priority=finding.severity,
+                status=(
+                    "CONFIRMED_ISSUE"
+                    if verdict == "CONFIRMED"
+                    else "POTENTIAL_RISK"
+                ),
+                title=finding.title,
+                rationale=rationale,
+                finding_id=finding.finding_id,
+                sources=sources,
+                source_locations=source_locations,
+                next_steps=[
+                    "Повторить расчёт по SQL из evidence и сверить строку источника.",
+                    "Сопоставить факт с указанным критерием и документом.",
+                    "Отдельно подтвердить первопричину; не выводить её только из факта отклонения.",
+                ],
+            )
+        )
+
+    for index, error in enumerate(execution_errors, start=1):
+        plan.append(
+            AuditPlanItem(
+                plan_id=f"PLAN-BLOCKED-{index:03d}",
+                priority=Severity.HIGH,
+                status="BLOCKED_CHECK",
+                title="Невыполненная аудиторская проверка",
+                rationale=error,
+                next_steps=[
+                    "Устранить ошибку источника или правила и повторить запуск."
+                ],
+            )
+        )
+    severity_order = {
+        Severity.CRITICAL: 0,
+        Severity.HIGH: 1,
+        Severity.MEDIUM: 2,
+        Severity.LOW: 3,
+    }
+    plan.sort(key=lambda item: (severity_order[item.priority], item.plan_id))
+    return reviews, plan

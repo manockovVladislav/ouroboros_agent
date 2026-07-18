@@ -80,6 +80,10 @@ new file mode 100644
 """
     developer_tools.apply_code_changes("RUN-DEV", patch)
     assert not (repository / "docs/improvement.md").exists()
+    preview = developer_tools.preview_improvement("RUN-DEV")
+    assert preview["changed_paths"] == ["docs/improvement.md"]
+    assert preview["merged"] is False
+    assert (tmp_path / "outputs/RUN-DEV/development/improvement.patch").is_file()
 
     feedback_dir = tmp_path / "outputs/RUN-EVAL/evaluation"
     feedback_dir.mkdir(parents=True)

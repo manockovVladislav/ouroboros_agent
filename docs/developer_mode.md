@@ -1,34 +1,32 @@
-# Ouroboros developer mode
+# Ouroboros self-improvement
 
-Developer mode никогда не изменяет стабильную рабочую копию. Для запуска
-`RUN-...` создаётся отдельный Git worktree и ветка:
+Самоулучшение включается в `configs/config.yaml`:
 
-```text
-/tmp/audit-insight-improvements/<run_id>
-└── improvement/<run_id>
+```yaml
+self_improvement:
+  enabled: true
+  require_detected_gap: true
+  allow_blocking_clarification: true
+  max_changed_files: 20
 ```
 
-Игнорируемые runtime-входы из `data/`, `knowledge/documents/` и локальные
-конфиги подключаются в worktree символическими ссылками. Они доступны для
-повторного анализа, но не попадают в diff или patch.
+Пользователь отправляет один обычный запрос. Ouroboros снача изучает источники,
+запускает аудит и оценивает, не помешал ли системный пробел в коде, правилах, RAG
+или промптах. Отсутствие нарушений или нехватка данных не считаются поводом менять код.
 
-Разрешённый API:
+При `require_detected_gap: true` improvement-контур не запускается без обнаруженного пробела.
+Если пробел есть, внутренний `run_id` автоматически используется для создания:
 
-- `create_improvement_branch(run_id)`;
-- `read_feedback(run_id)`;
-- `apply_code_changes(run_id, patch)`;
-- `run_tests(run_id, test_path="tests")`;
-- `create_patch(run_id, evaluation_run_id=None)`.
+```text
+/tmp/audit-insight-improvements/<run_id>   # isolated Git worktree
+improvement/<run_id>                       # isolated branch
+outputs/runs/<run_id>/development/improvement.patch
+```
 
-Перед применением patch проверяется активная ветка, размер patch и каждый
-затронутый путь. Запрещены `.env`, локальная/production-конфигурация,
-`audit-evaluator`, любые пути с evaluator или ground truth и всё вне allowlist
-исходного кода, правил, cases, тестов и документации.
+Вводить `run_id` вручную не нужно. Переключать текущую рабочую ветку также не нужно.
+Commit, push, merge, rebase и checkout для Ouroboros запрещены. Система отклоняет результат,
+если обнаружен коммит, защищённый путь или превышен `max_changed_files`.
 
-API не содержит merge/rebase/push. Изменения заканчиваются patch-файлом для
-повторной оценки и ручной проверки. Автоматический merge в `main`, `develop`
-или другую стабильную ветку невозможен.
-
-Экспорт patch дополнительно закрыт quality gate: feedback указанного
-evaluation-run обязан содержать `quality_improved: true`. При отсутствии
-оценки или ухудшении patch не выдаётся.
+Вопрос пользователю допускается только до расчётов и только если назначение данных нельзя
+установить из схем, конфигурации и knowledge. Во всех остальных случаях агент делает явное допущение
+и продолжает аудит.

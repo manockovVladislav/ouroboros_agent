@@ -10,7 +10,7 @@ from .agent import AuditInsightAgent
 from .audit_rag import ground_audit_with_documents
 from .case_package import load_case_package
 from .config import load_application_settings, resolve_source_location
-from .data_loader import DuckDBTableStore
+from .data_loader import DuckDBTableStore, is_database_source
 from .data_profiler import profile_table
 from .evidence_store import EvidenceStore
 from .finding_builder import deduplicate_findings
@@ -209,6 +209,22 @@ def list_data_sources(case_name: str) -> list[dict[str, Any]]:
     config_path = package.root / "data_sources.yaml"
     result = []
     for source in package.sources.sources:
+        if is_database_source(source):
+            result.append(
+                {
+                    "source_id": source.source_id,
+                    "source_type": source.source_type,
+                    "format": source.format,
+                    "enabled": source.enabled,
+                    "exists": None,
+                    "size_bytes": None,
+                    "connection": source.connection,
+                    "relation": source.location,
+                    "expected_fields": source.expected_fields,
+                    "metadata": source.metadata,
+                }
+            )
+            continue
         path = resolve_source_location(source, config_path)
         result.append(
             {
@@ -225,7 +241,9 @@ def list_data_sources(case_name: str) -> list[dict[str, Any]]:
     return result
 
 
-def profile_data_source(case_name: str, source_id: str) -> dict[str, Any]:
+def profile_data_source(
+    case_name: str, source_id: str, replica_name: str | None = None
+) -> dict[str, Any]:
     """Profile one configured table through DuckDB."""
 
     package = load_case_package(_case_dir(case_name))
@@ -238,7 +256,12 @@ def profile_data_source(case_name: str, source_id: str) -> dict[str, Any]:
     if source.source_type != "table":
         raise ValueError(f"Источник не является таблицей: {source_id}")
     config_path = package.root / "data_sources.yaml"
-    with DuckDBTableStore() as store:
+    settings = _application_settings()
+    selected_replica = _validate_replica_name(settings, replica_name)
+    with DuckDBTableStore(
+        database_settings=settings.databases,
+        selected_replica=selected_replica,
+    ) as store:
         store.ingest(source, config_path)
         return profile_table(store, source).model_dump(mode="json")
 
@@ -353,6 +376,7 @@ def run_full_audit(
     auditor_query: str,
     run_id: str | None = None,
     source_overrides: dict[str, str] | None = None,
+    replica_name: str | None = None,
 ) -> dict[str, Any]:
     """Primary API: auditor request to findings, Evidence and report."""
 
@@ -360,17 +384,17 @@ def run_full_audit(
         raise ValueError("Запрос аудитора должен содержать от 1 до 4000 символов")
     case_dir = _case_dir(case_name)
     package = load_case_package(case_dir)
+    settings = _application_settings()
+    selected_replica = _validate_replica_name(settings, replica_name)
     result, paths = AuditInsightAgent(agent_version="0.3.0").run_case(
         case_dir=case_dir,
         auditor_query=auditor_query,
         output_root=_output_root(),
         run_id=_validate_run_id(run_id),
         source_overrides=_safe_source_overrides(source_overrides),
+        settings=settings,
+        selected_replica=selected_replica,
     )
-    settings_file = Path(
-        os.getenv("AUDIT_INSIGHT_CONFIG", str(PROJECT_ROOT / "configs/config.yaml"))
-    ).expanduser().resolve()
-    settings = load_application_settings(settings_file)
     try:
         result, paths = ground_audit_with_documents(
             result=result,
@@ -388,6 +412,21 @@ def run_full_audit(
     return _run_payload(result, paths)
 
 
+def _application_settings():
+    settings_file = Path(
+        os.getenv("AUDIT_INSIGHT_CONFIG", str(PROJECT_ROOT / "configs/config.yaml"))
+    ).expanduser().resolve()
+    return load_application_settings(settings_file)
+
+
+def _validate_replica_name(settings, replica_name: str | None) -> str | None:
+    if replica_name is None:
+        return None
+    if replica_name not in settings.databases.connections:
+        raise ValueError(f"Unknown database replica: {replica_name}")
+    return replica_name
+
+
 def _run_payload(result: AgentRunResult, paths: dict[str, Path]) -> dict[str, Any]:
     payload = {
         "run_id": result.run_id,
@@ -395,6 +434,10 @@ def _run_payload(result: AgentRunResult, paths: dict[str, Path]) -> dict[str, An
         "case_name": result.case_name,
         "findings_count": len(result.findings),
         "findings": [item.model_dump(mode="json") for item in result.findings],
+        "finding_reviews": [
+            item.model_dump(mode="json") for item in result.finding_reviews
+        ],
+        "audit_plan": [item.model_dump(mode="json") for item in result.audit_plan],
         "rule_results": [item.model_dump(mode="json") for item in result.rule_results],
         "execution_errors": result.execution_errors,
         "candidate_findings_path": str(paths["candidate_findings"]),

@@ -34,6 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--output")
     ingest.add_argument("--chunk-size", type=int)
     ingest.add_argument("--chunk-overlap", type=int)
+    ingest.add_argument("--replica")
     _rag_arguments(ingest)
 
     search = commands.add_parser("search", help="Search indexed requirements")
@@ -56,6 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     audit.add_argument("--run-id")
     audit.add_argument("--agent-version", default="0.3.0")
+    audit.add_argument("--settings", default="configs/config.yaml")
+    audit.add_argument(
+        "--replica",
+        help="Exact allowlisted replica alias from settings",
+    )
 
     agent = commands.add_parser("agent", help="Run the existing audit check pipeline")
     agent.add_argument("--data-dir", required=True)
@@ -98,7 +104,13 @@ def _run_ingest(arguments: argparse.Namespace) -> None:
     retriever = _build_retriever(arguments, settings) if needs_rag else None
     database = Path(arguments.database or settings.storage.duckdb_path)
     database.parent.mkdir(parents=True, exist_ok=True)
-    with DuckDBTableStore(database) as store:
+    if arguments.replica and arguments.replica not in settings.databases.connections:
+        raise ValueError(f"Unknown database replica: {arguments.replica}")
+    with DuckDBTableStore(
+        database,
+        database_settings=settings.databases,
+        selected_replica=arguments.replica,
+    ) as store:
         result = ingest_catalog(
             arguments.config,
             store,
@@ -154,6 +166,9 @@ def _run_agent(arguments: argparse.Namespace) -> None:
 
 
 def _run_audit_case(arguments: argparse.Namespace) -> None:
+    settings = load_application_settings(arguments.settings)
+    if arguments.replica and arguments.replica not in settings.databases.connections:
+        raise ValueError(f"Unknown database replica: {arguments.replica}")
     source_overrides = {}
     for value in arguments.source:
         source_id, separator, path = value.partition("=")
@@ -168,6 +183,8 @@ def _run_audit_case(arguments: argparse.Namespace) -> None:
         database=arguments.database,
         shared_rules_dir=arguments.shared_rules,
         source_overrides=source_overrides,
+        settings=settings,
+        selected_replica=arguments.replica,
     )
     print(
         json.dumps(

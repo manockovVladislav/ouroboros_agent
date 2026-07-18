@@ -8,8 +8,13 @@ from audit_insight_agent.data_loader import (
 )
 from audit_insight_agent.models import (
     AgentRunResult,
+    CandidateFinding,
+    DataSource,
+    EvidenceReference,
     RunStatus,
+    Severity,
 )
+from audit_insight_agent.finding_builder import review_findings_and_build_plan
 from audit_insight_agent.report_generator import (
     write_run_outputs,
 )
@@ -124,3 +129,50 @@ def test_agent_result_can_be_saved(
     assert (
         paths["run_manifest"].exists()
     )
+
+
+def test_finding_is_challenged_and_plan_keeps_exact_source_location():
+    finding = CandidateFinding(
+        finding_id="FND-1",
+        check_id="CHECK-1",
+        title="Contradiction",
+        summary="Values disagree",
+        issue_type="contradiction",
+        severity=Severity.HIGH,
+        criterion="Sources must agree",
+        risk="Reporting can be distorted",
+        root_cause="Unknown",
+        confidence=0.9,
+        evidence=[
+            EvidenceReference(
+                evidence_id="EVD-1",
+                checksum="abc",
+                source_name="ledger",
+                object_id="row-1",
+                description="Mismatch row",
+                query="SELECT * FROM ledger WHERE id = 1",
+            )
+        ],
+    )
+    reviews, plan = review_findings_and_build_plan(
+        [finding],
+        [],
+        [
+            DataSource(
+                source_id="ledger",
+                relative_path="/data/ledger.csv",
+                file_format="csv",
+                size_bytes=10,
+            )
+        ],
+    )
+    assert reviews[0].verdict == "CONFIRMED"
+    assert plan[0].status == "CONFIRMED_ISSUE"
+    assert plan[0].source_locations == ["/data/ledger.csv"]
+
+    uncertain = finding.model_copy(update={"finding_id": "FND-2", "confidence": 0.6})
+    uncertain_reviews, uncertain_plan = review_findings_and_build_plan(
+        [uncertain], []
+    )
+    assert uncertain_reviews[0].verdict == "REQUIRES_VALIDATION"
+    assert uncertain_plan[0].status == "POTENTIAL_RISK"

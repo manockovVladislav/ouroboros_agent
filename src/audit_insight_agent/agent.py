@@ -12,13 +12,16 @@ from .config import resolve_source_location
 from .data_loader import (
     DuckDBTableStore,
     infer_table_format,
+    is_database_source,
 )
 from .evidence_store import EvidenceStore
 from .finding_builder import (
     deduplicate_findings,
+    review_findings_and_build_plan,
 )
 from .models import (
     AgentRunResult,
+    ApplicationSettings,
     AuditRuntimeContext,
     DataSource,
     RuleStatus,
@@ -125,6 +128,8 @@ class AuditInsightAgent:
         shared_rules_dir: str | Path | None = None,
         source_overrides: dict[str, str | Path] | None = None,
         selected_rule_ids: set[str] | None = None,
+        settings: ApplicationSettings | None = None,
+        selected_replica: str | None = None,
     ) -> tuple[AgentRunResult, dict[str, Path]]:
         """Execute a self-contained case package through the generic audit core."""
 
@@ -181,7 +186,11 @@ class AuditInsightAgent:
         evidence_store = EvidenceStore(run_output_dir / "evidence")
         source_descriptors = []
 
-        with DuckDBTableStore(database) as table_store:
+        with DuckDBTableStore(
+            database,
+            database_settings=settings.databases if settings else None,
+            selected_replica=selected_replica,
+        ) as table_store:
             table_names = {}
             for source in selected_sources:
                 if source.source_type != "table":
@@ -199,20 +208,39 @@ class AuditInsightAgent:
                         "source_loading_failed", error, source_id=source.source_id
                     )
                     raise
-                path = resolve_source_location(source, source_config_path)
-                source_descriptors.append(
-                    DataSource(
-                        source_id=source.source_id,
-                        relative_path=str(path),
-                        file_format=infer_table_format(path, source.format),
-                        size_bytes=path.stat().st_size,
+                if is_database_source(source):
+                    alias = (
+                        selected_replica
+                        if source.connection == "$selected"
+                        else source.connection
                     )
-                )
+                    source_descriptors.append(
+                        DataSource(
+                            source_id=source.source_id,
+                            relative_path=f"database://{alias}/{source.location}",
+                            file_format=source.format.casefold(),
+                            size_bytes=0,
+                        )
+                    )
+                    source_format = source.format.casefold()
+                    source_size = None
+                else:
+                    path = resolve_source_location(source, source_config_path)
+                    source_descriptors.append(
+                        DataSource(
+                            source_id=source.source_id,
+                            relative_path=str(path),
+                            file_format=infer_table_format(path, source.format),
+                            size_bytes=path.stat().st_size,
+                        )
+                    )
+                    source_format = infer_table_format(path, source.format)
+                    source_size = path.stat().st_size
                 event_log.event(
                     "source_loaded",
                     source_id=source.source_id,
-                    file_format=infer_table_format(path, source.format),
-                    size_bytes=path.stat().st_size,
+                    file_format=source_format,
+                    size_bytes=source_size,
                 )
 
             runtime = AuditRuntimeContext(
@@ -245,6 +273,9 @@ class AuditInsightAgent:
             for result in rule_results
             if result.status == RuleStatus.ERROR
         ]
+        finding_reviews, audit_plan = review_findings_and_build_plan(
+            findings, errors, source_descriptors
+        )
         completed_at = datetime.now(timezone.utc)
         result = AgentRunResult(
             run_id=actual_run_id,
@@ -258,6 +289,8 @@ class AuditInsightAgent:
             auditor_query=auditor_query,
             rule_results=rule_results,
             findings=findings,
+            finding_reviews=finding_reviews,
+            audit_plan=audit_plan,
             execution_errors=errors,
             metrics={
                 "selected_sources_count": len(selected_sources),

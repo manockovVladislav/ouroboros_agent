@@ -111,6 +111,42 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 
 При полном web-аудите агент автоматически находит документы в `data/` и `knowledge/`, индексирует изменённый набор в Qdrant и добавляет релевантные фрагменты к evidence каждой группы выводов.
 
+## PostgreSQL и Greenplum
+
+Реплики регистрируются в `configs/config.yaml`; пароль хранится только в environment:
+
+```yaml
+databases:
+  connections:
+    replica_a:
+      engine: postgresql       # или greenplum
+      host: db-read.example.local
+      port: 5432
+      database: audit_db
+      user: audit_readonly
+      password_env: AUDIT_REPLICA_A_PASSWORD
+      sslmode: require
+```
+
+Источник в `data_sources.yaml` может ссылаться на точный alias или на alias из запроса аудитора:
+
+```yaml
+- source_id: accounting_entries
+  source_type: table
+  format: postgresql
+  connection: $selected
+  location: audit.accounting_entries
+  # Вместо location можно задать один read-only SELECT/WITH:
+  # query: SELECT entry_id, amount, operation_date FROM audit.accounting_entries
+```
+
+В чате alias нужно назвать точно, например: `проверь replica_a`. Произвольные DSN из чата не
+принимаются. Коннектор принудительно включает read-only transaction, читает данные пакетами и переносит их в DuckDB.
+
+```bash
+export AUDIT_REPLICA_A_PASSWORD="..."
+```
+
 ## Установка
 
 ```bash
@@ -136,12 +172,12 @@ ouroboros:
 ```
 
 `/path/to/...` нужно заменить на пути в своём окружении.
-Если используется Conda, в `python_executable` нужно указать пут, который выводит `which python` в активированном окружении Audit Agent.
+Если используется Conda, в `python_executable` нужно указать путь, который выводит `which python` в активированном окружении Audit Agent.
 
 Проверка зависимостей:
 
 ```bash
-python -c "import duckdb, gradio, qdrant_client, sentence_transformers, docx, pypdf; print('dependencies: OK')"
+python -c "import duckdb, gradio, psycopg, qdrant_client, sentence_transformers, docx, pypdf; print('dependencies: OK')"
 ```
 
 Dashboard Qdrant: <http://127.0.0.1:6333/dashboard>. В конфиге указывается базовый API URL без `/dashboard`.
@@ -181,7 +217,11 @@ source .venv/bin/activate
 python scripts/run_web.py
 ```
 
-Открыть <http://127.0.0.1:7860>. Интерфейс показывает статус задачи Ouroboros, ответ агента, findings, `run_id` и файл отчёта.
+Открыть <http://127.0.0.1:7860> и отправить один обычный аудиторский запрос. Интерфейс кратко
+показывает текущий этап, ответ, findings, `run_id` и отчёт. Если в `configs/config.yaml` включён
+`self_improvement.enabled`, Ouroboros после аудита сам оценивает системные пробелы и при необходимости
+готовит patch в isolated worktree. Вводить `run_id` вручную или переключать ветку не нужно.
+Подробнее: [docs/developer_mode.md](docs/developer_mode.md).
 
 ## Логи и история
 
