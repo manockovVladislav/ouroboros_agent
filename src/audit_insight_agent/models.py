@@ -118,6 +118,18 @@ class QdrantSettings(BaseModel):
     api_key_env: str = "QDRANT_API_KEY"
 
 
+class OuroborosSettings(BaseModel):
+    """Connection to the separately running Ouroboros gateway."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = "http://127.0.0.1:8765"
+    workspace: str = "."
+    password_env: str = "OUROBOROS_NETWORK_PASSWORD"
+    poll_interval_seconds: float = Field(default=1.0, ge=0.1, le=30)
+    timeout_seconds: int = Field(default=900, ge=10, le=86_400)
+
+
 class StorageSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -146,6 +158,7 @@ class ApplicationSettings(BaseModel):
     environment: str = "development"
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
+    ouroboros: OuroborosSettings = Field(default_factory=OuroborosSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
     ingestion_output: str = "outputs/ingestion-result.json"
@@ -211,6 +224,22 @@ class IngestionResult(BaseModel):
     registered_tables: dict[str, str] = Field(default_factory=dict)
     profiles: list[DataProfile] = Field(default_factory=list)
     indexed_chunks: int = 0
+
+
+class FeedbackForOuroboros(BaseModel):
+    """Sanitized evaluator feedback; exact case answers are intentionally absent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "1.0"
+    run_id: str
+    case_name: str
+    summary: str
+    weaknesses: list[str] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    aggregate_metrics: dict[str, float] = Field(default_factory=dict)
+    previous_run_id: str | None = None
+    quality_improved: bool | None = None
 
 
 class RelationshipKey(BaseModel):

@@ -4,13 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "audit-insight-agent"
-version = "0.1.0"
-description = "Универсальное аудиторское ядро с DuckDB и RAG"
+version = "0.3.0"
+description = "Универсальный аудиторский агент с DuckDB, RAG и локальным web-чатом"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.12,<5",
     "duckdb>=1.1,<2",
+    "gradio>=5.0,<7",
     "openpyxl>=3.1,<4",
     "pandas>=2.2,<4",
     "pyarrow>=18,<24",

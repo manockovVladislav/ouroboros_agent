@@ -1,211 +1,191 @@
 # Audit Insight Agent
 
-Репозиторий содержит универсальное ядро загрузки и RAG, а также развиваемый
-контур аудиторских проверок. Ядро не зависит от названий файлов, портфелей,
-валют или структуры конкретного синтетического сценария.
+Локальный прототип универсального аудиторского агента. Таблицы загружаются в DuckDB, документы индексируются BGE-M3 в Qdrant, правила формируют воспроизводимые evidence, `candidate_findings.json` и `report.md`.
 
-## Назначение
-
-Агент предназначен для автоматизированного поиска аудиторских рисков, отклонений, противоречий и потенциальных направлений проверки.
-
-Планируемые источники:
-
-- требования регуляторов и внешние нормативные документы;
-- внутренние нормативные документы;
-- выгрузки и реплики информационных систем;
-- синтетические и обезличенные внутренние данные;
-- результаты предыдущих проверок и проектов;
-- материалы из Confluence;
-- программный код и документация из Bitbucket;
-- протоколы встреч и обсуждений;
-- текстовые, табличные, графические и другие источники.
-
-Планируемые результаты:
-
-- аудиторские инсайты и гипотезы;
-- возможные нарушения и противоречия;
-- направления дальнейшей проверки.
-
-Синтетические данные проекта размещены на [Яндекс Диске](https://disk.yandex.ru/d/nE7pIhMgKX7JWA).
-
-## Целевая схема
+## Архитектура
 
 ```text
-Ouroboros
-    ↓
-ouroboros_tools.py
-    ↓
-аудиторские модули
-    ↓
-правила + данные + документы
-    ↓
-evidence_store
-    ↓
-finding_builder
-    ↓
-report_generator
+Gradio web :7860
+    → Ouroboros server :8765 (/api/tasks)
+        → Audit Insight public API
+            ├─ DuckDB: таблицы, сверки, расчёты
+            ├─ BGE-M3 + Qdrant :6333: поиск по документам
+            ├─ Rule engine: quality, reconciliation, timeline, anomaly
+            └─ outputs/runs/<run_id>/: evidence, findings, report
+                → audit-evaluator (если настроен)
 ```
 
-Ouroboros не должен напрямую читать внутренние файлы или выполнять произвольный Python. Доступ к аудиторскому ядру должен происходить только через функции из `ouroboros_tools.py`.
+Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py` их не запускает.
 
 ## Структура проекта
 
 ```text
-├── README.md                         # Назначение, архитектура и запуск проекта
-├── pyproject.toml                    # Метаданные пакета и настройки сборки
-├── requirements.txt                 # Зависимости Python
-├── .gitignore                       # Исключения для Git
-├── .env.example                     # Пример переменных окружения без секретов
-│
-├── src/
-│   └── audit_insight_agent/          # Основной Python-пакет
-│       ├── __init__.py               # Публичная граница пакета
-│       ├── agent.py                  # Оркестрация аудиторского сценария
-│       ├── config.py                 # Загрузка и проверка конфигурации
-│       ├── models.py                 # Единые модели обмена между модулями
-│       │
-│       ├── document_loader.py        # Загрузка документов
-│       ├── data_loader.py            # Загрузка CSV, Excel, Parquet, JSON и SQL
-│       ├── data_profiler.py          # Профилирование структуры и качества данных
-│       ├── retriever.py              # Поиск фрагментов во внутренней базе знаний
-│       ├── analysis_tools.py         # Общие детерминированные расчёты
-│       │
-│       ├── rule_engine.py            # Запуск декларативных аудиторских правил
-│       ├── reconciliation.py         # Сверки показателей между источниками
-│       ├── anomaly_detector.py       # Поиск случаев для дополнительной проверки
-│       │
-│       ├── evidence_store.py         # Хранение воспроизводимых доказательств
-│       ├── finding_builder.py        # Сборка аудиторских наблюдений
-│       ├── report_generator.py       # Формирование итоговых отчётов
-│       │
-│       ├── ouroboros_tools.py        # Ограниченный API для Ouroboros
-│       ├── cli.py                    # Автономный запуск проекта из терминала
-│       └── logging_config.py         # Настройка безопасного логирования
-│
-├── rules/                            # Правила отдельно от Python-кода
-│   ├── data_quality/                 # Проверки качества данных
-│   ├── ovp/                          # Проверки открытой валютной позиции
-│   ├── cash/                         # Проверки денежных средств
-│   └── access_control/               # Проверки управления доступом
-│
-├── prompts/                          # Инструкции для LLM
-│   ├── system_prompt.md              # Роль и ограничения агента
-│   ├── audit_analysis.md             # Порядок аудиторского анализа
-│   ├── finding_prompt.md             # Формирование наблюдения
-│   └── report_prompt.md              # Формирование отчёта
-│
-├── configs/                          # Примеры конфигурации
-│   ├── config.example.yaml           # Общие параметры приложения
-│   ├── data_sources.example.yaml     # Описание источников данных
-│   └── logging.yaml                  # Параметры логирования
-│
-├── templates/                        # Шаблоны выходных документов
-│   ├── finding.md.j2                 # Шаблон аудиторского наблюдения
-│   └── report.md.j2                  # Шаблон итогового отчёта
-│
-├── scripts/                          # Вспомогательные точки запуска
-│   ├── run_agent.py                  # Запуск полного сценария
-│   ├── build_index.py                # Построение индекса документов
-│   ├── profile_data.py               # Профилирование набора данных
-│   ├── run_checks.py                 # Запуск аудиторских проверок
-│   └── export_output_schema.py       # Экспорт JSON Schema выходного контракта
-│
-├── tests/                            # Автоматические тесты
-│   ├── unit/                         # Тесты отдельных модулей
-│   │   └── test_output_contract.py # Проверка стабильности выходной схемы
-│   ├── integration/                  # Тесты взаимодействия компонентов
-│   ├── fixtures/                     # Небольшие синтетические данные
-│   └── test_agent.py                 # Сквозные тесты агента
-│
-├── data/
-│   └── sample/                       # Пример безопасных входных данных
-│
-├── knowledge/                        # База знаний для RAG
-│   ├── documents/                    # Документы; реальные файлы не коммитятся
-│   └── metadata/                     # Метаданные и описание документов
-│
-├── outputs/                          # Результаты работы; не коммитятся
-│   ├── evidence/                     # Сохранённые доказательства
-│   ├── findings/                     # Аудиторские наблюдения
-│   ├── reports/                      # Итоговые отчёты
-│   └── runs/                         # Артефакты отдельных запусков агента
-│
-├── docs/                             # Проектная документация
-│   ├── architecture.md               # Архитектура и границы компонентов
-│   ├── rules.md                      # Формат и требования к правилам
-│   └── deployment.md                 # План развёртывания
-│
-└── skills/
-    └── audit_insight/                # Навык аудиторского анализа
-        ├── SKILL.md                  # Инструкция и ограничения навыка
-        └── tools.py                  # Контракты доступных инструментов
+.
+├─ cases/
+│  ├─ README.md
+│  └─ physical_currency_ovp/
+│     ├─ data_sources.yaml
+│     ├─ relationships.yaml
+│     ├─ prompts/auditor_context.md
+│     └─ rules/                 # 4 YAML-правила текущей проверки
+├─ configs/
+│  ├─ config.example.yaml
+│  ├─ data_sources.example.yaml
+│  └─ logging.yaml
+├─ data/
+│  └─ ovp/
+│     ├─ replics/
+│     └─ vnd/
+├─ knowledge/
+│  ├─ documents/
+│  └─ metadata/
+├─ rules/
+│  ├─ access_control/
+│  ├─ cash/
+│  ├─ data_quality/
+│  ├─ market_operations/
+│  └─ ovp/
+├─ prompts/
+│  ├─ system_prompt.md
+│  ├─ audit_analysis.md
+│  ├─ finding_prompt.md
+│  └─ report_prompt.md
+├─ scripts/
+│  ├─ build_index.py
+│  ├─ export_output_schema.py
+│  ├─ profile_data.py
+│  ├─ run_agent.py
+│  ├─ run_checks.py
+│  └─ run_web.py
+├─ skills/audit_insight/
+│  ├─ SKILL.md
+│  └─ tools.py
+├─ src/audit_insight_agent/
+│  ├─ __init__.py
+│  ├─ agent.py                # оркестрация аудита
+│  ├─ config.py, models.py     # конфиги и контракты
+│  ├─ data_loader.py, data_profiler.py
+│  ├─ document_loader.py, ingestion.py, retriever.py
+│  ├─ rule_engine.py, analysis_tools.py, anomaly_detector.py
+│  ├─ reconciliation.py, evidence_store.py, finding_builder.py
+│  ├─ report_generator.py, case_package.py
+│  ├─ ouroboros_tools.py       # публичный API аудита
+│  ├─ ouroboros.py             # HTTP-клиент Ouroboros
+│  ├─ web.py, cli.py           # Gradio и CLI
+│  ├─ evaluator_adapter.py, developer_tools.py
+│  └─ logging_config.py
+├─ templates/
+│  ├─ finding.md.j2
+│  └─ report.md.j2
+├─ tests/
+│  ├─ fixtures/
+│  ├─ integration/
+│  └─ unit/
+├─ docs/
+│  ├─ architecture.md
+│  ├─ deployment.md
+│  ├─ developer_mode.md
+│  ├─ evaluator.md
+│  └─ rules.md
+├─ outputs/
+│  ├─ evidence/
+│  ├─ findings/
+│  ├─ reports/
+│  └─ runs/                    # артефакты по run_id
+├─ .env.example
+├─ .gitignore
+├─ pyproject.toml
+├─ requirements.txt
+├─ requirements.lock.txt
+└─ README.md
 ```
 
+## Куда класть файлы
 
-## Загрузка данных и построение RAG
+- Данные конкретной проверки: `data/`. Сюда же кладутся переданные для аудита PDF, DOCX, Markdown, TXT и HTML.
+- Дополнительные знания и нормативные документы: `knowledge/`.
+- Описания текущих файлов и связей: `cases/physical_currency_ovp/data_sources.yaml` и `relationships.yaml`.
+- Правила текущей проверки: `cases/physical_currency_ovp/rules/`; общие группы: `rules/`.
+- Результаты создаются автоматически в `outputs/runs/<run_id>/`.
 
-Источники регистрируются через YAML по схеме
-[configs/data_sources.example.yaml](configs/data_sources.example.yaml). Для
-таблиц задаются ожидаемые поля и ключи, для документов — произвольные
-метаданные поиска. Относительные пути считаются от каталога YAML-файла.
-
-Поддерживаются CSV, Excel, Parquet, JSON, PDF, DOCX, Markdown, TXT и HTML.
-Таблицы материализуются в DuckDB и автоматически профилируются. Документы
-разбиваются на стабильные фрагменты, кодируются `BAAI/bge-m3` и сохраняются в
-Qdrant. Ключ Qdrant передаётся только через `QDRANT_API_KEY`.
-
-Общие параметры моделей и хранилищ находятся в
-[configs/config.example.yaml](configs/config.example.yaml). Локальный
-`configs/config.yaml` (исключён из Git) уже указывает BGE-M3 по пути
-`/home/vladislav/models/bge-m3`. Другой конфиг выбирается через `--settings`.
+## Установка
 
 ```bash
-python -m pip install -e .
-audit-insight ingest --config configs/data_sources.example.yaml
-audit-insight search "требования к учёту операций"
+PROJECT_DIR="/path/to/ouroboros"
+cd "$PROJECT_DIR"
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+cp configs/config.example.yaml configs/config.yaml
 ```
 
-По умолчанию используются локальные файлы `.audit_insight/audit.duckdb` и
-`.audit_insight/qdrant`. Сервер Qdrant подключается флагом `--qdrant-url`.
+После копирования укажите в `configs/config.yaml` свои пути:
 
-## CLI
+```yaml
+embedding:
+  model: /path/to/bge-m3
+qdrant:
+  url: http://127.0.0.1:6333
+ouroboros:
+  url: http://127.0.0.1:8765
+  workspace: /path/to/ouroboros
+```
+
+`/path/to/...` нужно заменить на пути в своём окружении.
+
+Dashboard Qdrant: <http://127.0.0.1:6333/dashboard>. В конфиге указывается базовый API URL без `/dashboard`.
+
+## Запуск Ouroboros
+
+Ouroboros запускается отдельно:
 
 ```bash
-audit-insight ingest --config configs/data_sources.example.yaml
-audit-insight search "поисковый запрос"
-audit-insight audit \
-  --case cases/physical_currency_ovp \
-  --query "Проверить физическую валюту, ОВП и последовательности"
-audit-insight agent --data-dir data/sample
+CORE="/path/to/ouroboros-core"
+
+cd "$CORE"
+source .venv/bin/activate
+
+export OUROBOROS_SAFETY_MODE=full
+export OUROBOROS_FILE_BROWSER_DEFAULT="$TEST_WORKSPACE"
+export OUROBOROS_SERVER_HOST=127.0.0.1
+export OUROBOROS_SERVER_PORT=8765
+
+ouroboros server --host 127.0.0.1 --port 8765
 ```
 
-## Декларативное аудиторское ядро
+`OUROBOROS_FILE_BROWSER_DEFAULT` задаёт папку интерфейса Ouroboros. Для каждой задачи Audit Insight web передаёт свой `workspace_root` из `configs/config.yaml`.
 
-Новый сценарий добавляется без изменения Python-кода:
+## Запуск web-чата
 
-```text
-cases/<case_name>/
-├── data_sources.yaml
-├── relationships.yaml
-├── rules/
-└── prompts/
-```
-
-По запросу аудитора ядро выбирает релевантные правила и их источники,
-материализует таблицы в DuckDB, запускает SQL-проверки, сверки, анализ
-последовательностей и статистические тесты. Каждая строка отклонения получает
-отдельный checksum-защищённый Evidence. Результаты сохраняются как
-`candidate_findings.json`, `report.md`, `run_manifest.json` и каталог
-`evidence/`.
-
-Первый исполняемый пример находится в
-[`cases/physical_currency_ovp`](cases/physical_currency_ovp). Названия его
-полей и формулы находятся только в YAML-файлах пакета. Сам пакет не содержит
-данных: его `data_sources.yaml` ссылается на входы в `data/`. Переданный файл
-можно подменить без изменения YAML:
+Когда Qdrant и Ouroboros уже работают, в отдельном терминале:
 
 ```bash
-audit-insight audit --case cases/physical_currency_ovp \
-  --query "проверить лимиты ОВП" \
-  --source ovp_snapshots=data/new_run/ovp_snapshots.csv
+PROJECT_DIR="/path/to/ouroboros"
+cd "$PROJECT_DIR"
+source .venv/bin/activate
+python scripts/run_web.py
+```
+
+Открыть <http://127.0.0.1:7860>. Интерфейс показывает статус задачи Ouroboros, ответ агента, findings, `run_id` и файл отчёта.
+
+## CLI и индексация
+
+Загрузка источников из YAML и построение индекса:
+
+```bash
+audit-insight ingest --config cases/physical_currency_ovp/data_sources.yaml --settings configs/config.yaml
+```
+
+Прямой запуск проверки без web и Ouroboros:
+
+```bash
+audit-insight audit --case cases/physical_currency_ovp --query "Проверить данные и сформировать выводы"
+```
+
+Доступные Ouroboros функции: `list_data_sources`, `profile_data_source`, `search_documents`, `run_rule`, `run_rule_group`, `build_findings`, `generate_report`, `run_full_audit`. Developer-функции изменения кода и веток находятся в `developer_tools.py` и не вызываются обычным web-аудитом.
+
+## Проверка
+
+```bash
+pytest -q
 ```

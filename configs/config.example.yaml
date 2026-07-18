@@ -4,16 +4,24 @@ environment: development
 # Общее место для локальных и удалённых embedding-моделей.
 embedding:
   provider: sentence_transformers
-  model: /home/vladislav/models/bge-m3
+  model: /path/to/bge-m3
   device: null
   batch_size: 16
 
 qdrant:
-  # Если url не задан, используется локальное хранилище path.
-  url: null
+  # API сервера; dashboard доступен по /dashboard.
+  url: http://127.0.0.1:6333
   path: .audit_insight/qdrant
   collection: audit_knowledge
   api_key_env: QDRANT_API_KEY
+
+# Ouroboros запускается отдельным процессом; web-чат создаёт задачи через /api/tasks.
+ouroboros:
+  url: http://127.0.0.1:8765
+  workspace: /path/to/ouroboros
+  password_env: OUROBOROS_NETWORK_PASSWORD
+  poll_interval_seconds: 1
+  timeout_seconds: 900
 
 storage:
   duckdb_path: .audit_insight/audit.duckdb

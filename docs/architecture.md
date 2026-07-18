@@ -48,3 +48,22 @@ YAML registry
 `relationships.yaml` определяет источники и ключи сверок. Python-компиляторы
 работают только с общими понятиями source, key, value, timestamp и event; все
 предметные поля и формулы остаются в case-пакете.
+
+## Web, Ouroboros и evaluator
+
+```text
+Gradio chat
+  → OuroborosHTTPClient
+  → отдельный Ouroboros server (/api/tasks)
+  → allowlisted ouroboros_tools в workspace Audit Insight
+  → AuditInsightAgent
+  → candidate_findings.json + report.md
+  → external audit-evaluator
+  → sanitized feedback_for_ouroboros.json
+  → isolated improvement/<run_id> worktree
+```
+
+Web и developer mode используют разные модули. Developer tools не входят в
+обычный web callback и не имеют операций merge или доступа к evaluator.
+Web не запускает Ouroboros и Qdrant как дочерние процессы: их URL задаются в
+`configs/config.yaml`.

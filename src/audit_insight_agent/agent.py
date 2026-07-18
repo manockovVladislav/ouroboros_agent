@@ -77,7 +77,7 @@ class AuditInsightAgent:
 
     def __init__(
         self,
-        agent_version: str = "0.1.0",
+        agent_version: str = "0.3.0",
     ) -> None:
 
         self.agent_version = (
@@ -259,13 +259,23 @@ class AuditInsightAgent:
         database: str | Path = ":memory:",
         shared_rules_dir: str | Path | None = None,
         source_overrides: dict[str, str | Path] | None = None,
+        selected_rule_ids: set[str] | None = None,
     ) -> tuple[AgentRunResult, dict[str, Path]]:
         """Execute a self-contained case package through the generic audit core."""
 
         started_at = datetime.now(timezone.utc)
         actual_run_id = run_id or create_run_id()
         package = load_case_package(case_dir, shared_rules_dir=shared_rules_dir)
-        selected_rules = select_relevant_rules(auditor_query, package.rules)
+        if selected_rule_ids is None:
+            selected_rules = select_relevant_rules(auditor_query, package.rules)
+        else:
+            available = {rule.rule_id: rule for rule in package.rules if rule.enabled}
+            unknown_rules = selected_rule_ids - set(available)
+            if unknown_rules:
+                raise ValueError(f"Unknown rule IDs: {sorted(unknown_rules)}")
+            selected_rules = tuple(
+                available[rule_id] for rule_id in sorted(selected_rule_ids)
+            )
         selected_source_ids = {
             source_id for rule in selected_rules for source_id in rule.source_ids
         }

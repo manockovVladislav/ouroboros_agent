@@ -54,13 +54,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override a configured input with a file placed under data/",
     )
     audit.add_argument("--run-id")
-    audit.add_argument("--agent-version", default="0.2.0")
+    audit.add_argument("--agent-version", default="0.3.0")
 
     agent = commands.add_parser("agent", help="Run the existing audit check pipeline")
     agent.add_argument("--data-dir", required=True)
     agent.add_argument("--output-root", default="outputs/runs")
     agent.add_argument("--run-id")
-    agent.add_argument("--agent-version", default="0.1.0")
+    agent.add_argument("--agent-version", default="0.3.0")
     return parser
 
 

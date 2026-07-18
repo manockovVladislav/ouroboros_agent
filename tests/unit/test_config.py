@@ -17,3 +17,4 @@ chunking: {}
     settings = load_application_settings(config)
     assert settings.embedding.model == "/models/bge-m3"
     assert settings.qdrant.collection == "audit_knowledge"
+    assert settings.ouroboros.url == "http://127.0.0.1:8765"
