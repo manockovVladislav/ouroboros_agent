@@ -8,6 +8,7 @@ build/
 dist/
 *.egg-info/
 
+
 # Virtual environments
 .venv/
 venv/
@@ -54,6 +55,7 @@ knowledge/documents/**
 !knowledge/documents/.gitkeep
 
 # Local indexes and databases
+.audit_insight/
 *.db
 *.sqlite
 *.sqlite3
