@@ -13,7 +13,7 @@ from audit_insight_agent.ouroboros_tools import (
     profile_data_source,
     run_rule,
 )
-from audit_insight_agent.web import available_cases, build_interface
+from audit_insight_agent.web import build_interface
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -25,13 +25,12 @@ def test_public_api_lists_profiles_and_runs_one_rule(tmp_path, monkeypatch):
     monkeypatch.setenv("AUDIT_AGENT_OUTPUT_ROOT", str(tmp_path))
     monkeypatch.setenv("AUDIT_AGENT_ALLOWED_DATA_ROOT", str(PROJECT_ROOT / "data"))
 
-    sources = list_data_sources("physical_currency_ovp")
+    sources = list_data_sources()
     assert any(item["source_id"] == "ovp_snapshots" for item in sources)
-    profile = profile_data_source("physical_currency_ovp", "portfolio_reference")
+    profile = profile_data_source("portfolio_reference")
     assert profile["row_count"] > 0
 
     result = run_rule(
-        "physical_currency_ovp",
         "OVP_LIMIT_EXCEEDED",
         run_id="RUN-API",
     )
@@ -49,18 +48,15 @@ def test_public_api_lists_profiles_and_runs_one_rule(tmp_path, monkeypatch):
         assert "Document/location:" in report
 
 
-def test_web_case_discovery_and_answer_summary():
-    assert "physical_currency_ovp" in available_cases()
+def test_web_answer_summary():
     answer = OuroborosOrchestrator._answer(
         {
             "status": "COMPLETED",
             "findings": [{"severity": "HIGH", "title": "Test finding"}],
             "execution_errors": [],
-            "evaluation": {"status": "NOT_CONFIGURED"},
         }
     )
     assert "HIGH: 1" in answer
-    assert "audit-evaluator не настроен" in answer
 
 
 def test_gradio_interface_builds_without_starting_server():
@@ -112,7 +108,7 @@ def test_web_orchestrator_uses_external_ouroboros_task_api(tmp_path):
         client=fake,
         result_loader=lambda run_id: dict(loaded),
     )
-    events = list(orchestrator.run_with_updates("Проверить", "demo"))
+    events = list(orchestrator.run_with_updates("Проверить"))
 
     assert events[-1]["result"]["run_id"] == "RUN-EXTERNAL"
     assert "scripts/ouroboros_audit.py" in fake.description
@@ -171,8 +167,8 @@ def test_developer_orchestrator_uses_isolated_worktree_without_merge(
     )
     monkeypatch.setattr(
         developer_module,
-        "read_feedback",
-        lambda run_id: (_ for _ in ()).throw(FileNotFoundError()),
+        "run_tests",
+        lambda run_id: {"passed": True, "returncode": 0, "output": "ok"},
     )
     fake = FakeClient()
     settings = ApplicationSettings(
@@ -203,7 +199,7 @@ def test_agent_system_improves_only_when_a_gap_is_detected():
             )
             self.improvement_needed = improvement_needed
 
-        def run_with_updates(self, user_request, case_name):
+        def run_with_updates(self, user_request):
             yield {"kind": "status", "message": "Analyzing"}
             yield {
                 "kind": "result",
@@ -229,6 +225,8 @@ def test_agent_system_improves_only_when_a_gap_is_detected():
                     "branch": "improvement/RUN-AUTO",
                     "changed_paths": ["src/audit_insight_agent/reconciliation.py"],
                     "patch_path": "/tmp/improvement.patch",
+                    "has_changes": True,
+                    "tests_passed": True,
                     "merged": False,
                     "committed": False,
                     "pushed": False,
@@ -239,7 +237,7 @@ def test_agent_system_improves_only_when_a_gap_is_detected():
     no_gap = AuditAgentSystem(
         audit=FakeAudit(False), developer=no_gap_developer
     )
-    no_gap_result = list(no_gap.run_with_updates("Audit", "demo"))[-1]["result"]
+    no_gap_result = list(no_gap.run_with_updates("Audit"))[-1]["result"]
     assert no_gap_developer.calls == 0
     assert no_gap_result["self_improvement"]["status"] == "NOT_REQUIRED"
 
@@ -247,10 +245,54 @@ def test_agent_system_improves_only_when_a_gap_is_detected():
     with_gap = AuditAgentSystem(
         audit=FakeAudit(True), developer=gap_developer
     )
-    gap_result = list(with_gap.run_with_updates("Audit", "demo"))[-1]["result"]
+    gap_result = list(with_gap.run_with_updates("Audit"))[-1]["result"]
     assert gap_developer.calls == 1
     assert gap_result["self_improvement"]["status"] == "PATCH_READY"
     assert gap_result["self_improvement"]["merged"] is False
+
+
+def test_agent_system_reviews_every_audit_when_enabled():
+    class FakeAudit:
+        settings = ApplicationSettings(
+            self_improvement={
+                "enabled": True,
+                "review_after_every_audit": True,
+                "require_detected_gap": True,
+            }
+        )
+
+        def run_with_updates(self, user_request):
+            yield {
+                "kind": "result",
+                "result": {
+                    "run_id": "RUN-REVIEW",
+                    "status": "COMPLETED",
+                    "findings": [],
+                    "execution_errors": [],
+                    "improvement_needed": False,
+                },
+            }
+
+    class FakeDeveloper:
+        calls = 0
+
+        def run_after_audit(self, audit_result, user_request):
+            self.calls += 1
+            yield {
+                "kind": "result",
+                "result": {
+                    "has_changes": False,
+                    "tests_passed": None,
+                    "merged": False,
+                },
+            }
+
+    developer = FakeDeveloper()
+    result = list(
+        AuditAgentSystem(audit=FakeAudit(), developer=developer).run_with_updates("Audit")
+    )[-1]["result"]
+    assert developer.calls == 1
+    assert result["self_improvement"]["status"] == "NO_CHANGES"
 
 
 def test_ouroboros_protocol_supports_one_blocking_clarification():

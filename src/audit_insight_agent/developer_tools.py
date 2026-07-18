@@ -9,7 +9,6 @@ import sys
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .models import FeedbackForOuroboros
 from .ouroboros_tools import PROJECT_ROOT, _output_root, _validate_run_id
 
 
@@ -27,7 +26,6 @@ PROTECTED_FILES = {
 ALLOWED_TOP_LEVEL = {
     "src",
     "rules",
-    "cases",
     "tests",
     "docs",
     "prompts",
@@ -36,6 +34,11 @@ ALLOWED_TOP_LEVEL = {
     "README.md",
     "pyproject.toml",
     "requirements.txt",
+    "configs",
+}
+ALLOWED_CONFIG_FILES = {
+    "configs/config.example.yaml",
+    "configs/data_sources.example.yaml",
 }
 
 
@@ -184,6 +187,10 @@ def _patch_paths(patch: str) -> set[str]:
         normalized = path.as_posix()
         if normalized in PROTECTED_FILES:
             raise PermissionError(f"Protected file cannot be changed: {normalized}")
+        if path.parts[0] == "configs" and normalized not in ALLOWED_CONFIG_FILES:
+            raise PermissionError(
+                f"Only non-production config templates can be changed: {normalized}"
+            )
         lowered_parts = {part.casefold() for part in path.parts}
         if lowered_parts & PROTECTED_PARTS or any(
             any(token in part for token in ("ground_truth", "groundtruth", "ground-truth", "evaluator"))
@@ -247,15 +254,6 @@ def run_tests(run_id: str, test_path: str = "tests") -> dict[str, Any]:
         "returncode": completed.returncode,
         "output": (completed.stdout + completed.stderr)[-20_000:],
     }
-
-
-def read_feedback(run_id: str) -> dict[str, Any]:
-    validated = _validate_run_id(run_id)
-    if validated is None:
-        raise ValueError("run_id обязателен")
-    path = _output_root() / validated / "evaluation" / "feedback_for_ouroboros.json"
-    feedback = FeedbackForOuroboros.model_validate_json(path.read_text(encoding="utf-8"))
-    return feedback.model_dump(mode="json")
 
 
 def preview_improvement(run_id: str) -> dict[str, Any]:
@@ -323,34 +321,3 @@ def preview_improvement(run_id: str) -> dict[str, Any]:
     )
     temporary_summary.replace(summary_path)
     return summary
-
-
-def create_patch(
-    run_id: str,
-    evaluation_run_id: str | None = None,
-) -> dict[str, str]:
-    feedback = read_feedback(evaluation_run_id or run_id)
-    if feedback.get("quality_improved") is not True:
-        raise PermissionError(
-            "Patch export requires evaluator feedback with quality_improved=true"
-        )
-    worktree = _worktree_path(run_id)
-    branch = _branch_name(run_id)
-    _assert_improvement_worktree(worktree, branch)
-    untracked = _git(worktree, "ls-files", "--others", "--exclude-standard")
-    if untracked.returncode != 0:
-        raise RuntimeError(untracked.stderr.strip() or "Cannot list untracked files")
-    untracked_paths = [line for line in untracked.stdout.splitlines() if line]
-    if untracked_paths:
-        for path in untracked_paths:
-            _patch_paths(f"--- /dev/null\n+++ b/{path}\n")
-        intent = _git(worktree, "add", "-N", "--", *untracked_paths)
-        if intent.returncode != 0:
-            raise RuntimeError(intent.stderr.strip() or "Cannot include new files in patch")
-    completed = _git(worktree, "diff", "--binary", "--", ".")
-    if completed.returncode != 0:
-        raise RuntimeError(completed.stderr.strip() or "git diff failed")
-    patch = completed.stdout
-    if len(patch.encode("utf-8")) > 2_000_000:
-        raise ValueError("Generated patch exceeds 2 MB limit")
-    return {"branch": branch, "patch": patch}

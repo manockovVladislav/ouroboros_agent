@@ -5,20 +5,9 @@ import inspect
 import logging
 
 from .agent_system import AuditAgentSystem
-from .ouroboros_tools import DEFAULT_CASES_ROOT
 
 
 logger = logging.getLogger("audit_insight.web")
-
-
-def available_cases() -> list[str]:
-    if not DEFAULT_CASES_ROOT.exists():
-        return []
-    return sorted(
-        path.name
-        for path in DEFAULT_CASES_ROOT.iterdir()
-        if path.is_dir() and (path / "data_sources.yaml").is_file()
-    )
 
 
 def build_interface():
@@ -27,37 +16,33 @@ def build_interface():
     except ImportError as error:
         raise RuntimeError("Web UI requires the 'gradio' package") from error
 
-    cases = available_cases()
     orchestrator = AuditAgentSystem()
 
-    def respond(message, history, case_name, pending_request):
+    def respond(message, history, pending_request):
         message = (message or "").strip()
         history = list(history or [])
         pending_request = dict(pending_request or {})
         if not message:
-            yield history, "Введите задачу аудитора.", {}, None, "", pending_request
+            yield history, "Введите задачу аудитора.", {}, None, "", pending_request, ""
             return
         history.append({"role": "user", "content": message})
         if pending_request:
             original_request = str(pending_request.get("user_request") or "")
-            effective_case = str(pending_request.get("case_name") or case_name)
             effective_request = (
                 f"{original_request}\n\nОтвет на блокирующий вопрос: {message}"
             )
         else:
             original_request = message
             effective_request = message
-            effective_case = case_name
         logger.info(
-            "Web audit requested case=%s query_length=%s",
-            effective_case,
+            "Web audit requested query_length=%s",
             len(effective_request),
         )
-        yield history, "Передача задачи в Ouroboros…", {}, None, "", {}
+        yield history, "Передача задачи в Ouroboros…", {}, None, "", {}, ""
         try:
-            for event in orchestrator.run_with_updates(effective_request, effective_case):
+            for event in orchestrator.run_with_updates(effective_request):
                 if event["kind"] == "status":
-                    yield history, event["message"], {}, None, "", {}
+                    yield history, event["message"], {}, None, "", {}, ""
                     continue
                 if event["kind"] == "clarification":
                     history.append(
@@ -65,7 +50,6 @@ def build_interface():
                     )
                     pending = {
                         "user_request": original_request,
-                        "case_name": effective_case,
                     }
                     yield (
                         history,
@@ -74,16 +58,31 @@ def build_interface():
                         None,
                         "",
                         pending,
+                        "",
                     )
                     return
                 result = event["result"]
                 answer = result["answer"]
                 improvement = result.get("self_improvement") or {}
                 if improvement.get("status") == "PATCH_READY":
+                    changed_paths = improvement.get("changed_paths") or []
                     answer += (
                         "\n\nOuroboros подготовил изолированное улучшение: "
-                        f"{len(improvement.get('changed_paths') or [])} файлов. "
-                        "Изменения не влиты в рабочую ветку."
+                        f"{len(changed_paths)} файлов. Тесты прошли; изменения не "
+                        "влиты в рабочую ветку.\n"
+                        f"Ветка: `{improvement.get('branch')}`\n"
+                        f"Patch: `{improvement.get('patch_path')}`\n"
+                        f"Файлы: {', '.join(f'`{path}`' for path in changed_paths)}"
+                    )
+                elif improvement.get("status") == "NO_CHANGES":
+                    answer += (
+                        "\n\nOuroboros выполнил post-audit review: "
+                        "обоснованных изменений проекта не требуется."
+                    )
+                elif improvement.get("status") == "TESTS_FAILED":
+                    answer += (
+                        "\n\nOuroboros подготовил правки, но они не прошли "
+                        "тесты и не готовы к ручному применению."
                     )
                 history.append({"role": "assistant", "content": answer})
                 confirmed_ids = {
@@ -113,31 +112,26 @@ def build_interface():
                     result["report_path"],
                     result["run_id"],
                     {},
+                    "",
                 )
         except Exception as error:
-            logger.exception("Web audit failed case=%s", effective_case)
+            logger.exception("Web audit failed")
             history.append(
                 {
                     "role": "assistant",
                     "content": f"Запуск завершился ошибкой: {type(error).__name__}: {error}",
                 }
             )
-            yield history, "Статус: **ERROR**", {}, None, "", {}
+            yield history, "Статус: **ERROR**", {}, None, "", {}, ""
 
     with gr.Blocks(title="Audit Insight Agent") as interface:
         gr.Markdown(
             "# Audit Insight Agent\n"
-            "Ouroboros управляет анализом, а при обнаружении системного пробела "
-            "готовит изолированное улучшение без merge."
+            "Ouroboros управляет анализом, после каждого аудита проводит "
+            "review и может подготовить изолированное улучшение без merge."
         )
         pending_request = gr.State({})
-        with gr.Row():
-            case_name = gr.Dropdown(
-                choices=cases,
-                value=cases[0] if cases else None,
-                label="Набор правил",
-            )
-            run_id = gr.Textbox(label="run_id", interactive=False)
+        run_id = gr.Textbox(label="run_id", interactive=False)
         chatbot_options = {"label": "Диалог", "height": 440}
         if "type" in inspect.signature(gr.Chatbot).parameters:
             chatbot_options["type"] = "messages"
@@ -147,14 +141,14 @@ def build_interface():
             placeholder="Проанализируй данны в data/ и документы в knowledge/",
             lines=3,
         )
-        submit = gr.Button("Запустить агента", variant="primary")
+        submit = gr.Button("Отправить", variant="primary")
         status = gr.Markdown("Статус: ожидание запроса")
         findings = gr.JSON(
             label="Подтверждённые выводы и ранжированный план"
         )
         report = gr.File(label="Отчёт report.md", interactive=False)
 
-        event_inputs = [message, chatbot, case_name, pending_request]
+        event_inputs = [message, chatbot, pending_request]
         event_outputs = [
             chatbot,
             status,
@@ -162,11 +156,8 @@ def build_interface():
             report,
             run_id,
             pending_request,
+            message,
         ]
-        submit.click(respond, inputs=event_inputs, outputs=event_outputs).then(
-            lambda: "", outputs=message
-        )
-        message.submit(respond, inputs=event_inputs, outputs=event_outputs).then(
-            lambda: "", outputs=message
-        )
+        submit.click(respond, inputs=event_inputs, outputs=event_outputs)
+        message.submit(respond, inputs=event_inputs, outputs=event_outputs)
     return interface

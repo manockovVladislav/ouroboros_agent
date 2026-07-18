@@ -27,6 +27,8 @@ ouroboros:
 # Ouroboros после аудита может сам исправить общую логику в isolated worktree.
 self_improvement:
   enabled: false
+  # Всегда запускать review; файлы меняются только при обоснованном пробеле.
+  review_after_every_audit: true
   require_detected_gap: true
   allow_blocking_clarification: true
   max_changed_files: 20

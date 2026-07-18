@@ -23,7 +23,6 @@ def test_run_history_is_append_only_and_redacts_secrets(tmp_path):
     chat_path = write_chat_history(
         run_dir,
         run_id="RUN-LOG",
-        case_name="demo",
         task_id="task-1",
         user_request="Check data",
         ouroboros_answer="Completed",

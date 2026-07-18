@@ -42,19 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--limit", type=int, default=5)
     _rag_arguments(search)
 
-    audit = commands.add_parser("audit", help="Run a declarative audit case package")
-    audit.add_argument("--case", required=True)
+    audit = commands.add_parser("audit", help="Discover inputs and run an audit")
+    audit.add_argument("--data-dir", default="data")
     audit.add_argument("--query", required=True)
     audit.add_argument("--output-root", default="outputs/runs")
     audit.add_argument("--database", default=":memory:")
-    audit.add_argument("--shared-rules")
-    audit.add_argument(
-        "--source",
-        action="append",
-        default=[],
-        metavar="SOURCE_ID=PATH",
-        help="Override a configured input with a file placed under data/",
-    )
     audit.add_argument("--run-id")
     audit.add_argument("--agent-version", default="0.3.0")
     audit.add_argument("--settings", default="configs/config.yaml")
@@ -165,24 +157,16 @@ def _run_agent(arguments: argparse.Namespace) -> None:
     )
 
 
-def _run_audit_case(arguments: argparse.Namespace) -> None:
+def _run_audit(arguments: argparse.Namespace) -> None:
     settings = load_application_settings(arguments.settings)
     if arguments.replica and arguments.replica not in settings.databases.connections:
         raise ValueError(f"Unknown database replica: {arguments.replica}")
-    source_overrides = {}
-    for value in arguments.source:
-        source_id, separator, path = value.partition("=")
-        if not separator or not source_id or not path:
-            raise ValueError("--source must use SOURCE_ID=PATH format")
-        source_overrides[source_id] = path
-    result, paths = AuditInsightAgent(arguments.agent_version).run_case(
-        case_dir=arguments.case,
+    result, paths = AuditInsightAgent(arguments.agent_version).run(
+        data_dir=arguments.data_dir,
         auditor_query=arguments.query,
         output_root=arguments.output_root,
         run_id=arguments.run_id,
         database=arguments.database,
-        shared_rules_dir=arguments.shared_rules,
-        source_overrides=source_overrides,
         settings=settings,
         selected_replica=arguments.replica,
     )
@@ -191,7 +175,6 @@ def _run_audit_case(arguments: argparse.Namespace) -> None:
             {
                 "run_id": result.run_id,
                 "status": result.status.value,
-                "case": result.case_name,
                 "findings_count": len(result.findings),
                 "candidate_findings": str(paths["candidate_findings"]),
                 "report": str(paths["report"]),
@@ -215,7 +198,7 @@ def main() -> None:
     elif arguments.command == "search":
         _run_search(arguments)
     elif arguments.command == "audit":
-        _run_audit_case(arguments)
+        _run_audit(arguments)
     else:
         _run_agent(arguments)
 

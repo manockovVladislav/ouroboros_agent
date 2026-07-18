@@ -1,0 +1,29 @@
+rule_id: ROBOT_ACCEPTED_ORDER_OVER_LIMIT
+version: "1.0"
+kind: sql
+description: Поиск принятых роботом заявок с номиналом выше лимита
+source_ids: [robot_orders, robot_limits]
+tags: [robot, source_code, risk_guard, notional, limit, contradiction]
+sql:
+  object_id_column: order_id
+  query: >-
+    SELECT o.order_id, o.robot_id, o.event_ts, o.symbol, o.side,
+    o.quantity, o.price_cents, o.status, o.decision_reason,
+    l.max_order_notional_usd,
+    o.quantity * (o.price_cents / 100.0) AS calculated_notional_usd
+    FROM {{robot_orders}} o
+    JOIN {{robot_limits}} l ON l.robot_id = o.robot_id
+    WHERE o.status = 'ACCEPTED'
+      AND l.enabled = true
+      AND o.quantity * (o.price_cents / 100.0) > l.max_order_notional_usd
+finding:
+  title: Робот {robot_id} принял сверхлимитную заявку {order_id}
+  summary: Заявка с номиналом {calculated_notional_usd} USD принята при лимите {max_order_notional_usd} USD.
+  issue_type: pretrade_limit_bypass
+  root_cause: Возможна ошибка в пересчёте price_cents и quantity; первопричина требует проверки кода.
+  criterion: TRD-RISK-017 требует REJECT, если quantity * (price_cents / 100.0) выше лимита.
+  risk: Обход предторгового лимита и неконтролируемая рыночная экспозиция.
+  recommendation: Сверить формулу RiskGuard с TRD-RISK-017 и добавить boundary-test для quantity меньше 100.
+  severity: CRITICAL
+  confidence: 1.0
+  tags: [confirmed_from_order_log, code_review_required]

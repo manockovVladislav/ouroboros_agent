@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from audit_insight_agent.agent import AuditInsightAgent
-from audit_insight_agent.case_package import load_case_package, select_relevant_rules
+from audit_insight_agent.workspace import discover_workspace, select_relevant_rules
 from audit_insight_agent.evidence_store import EvidenceStore
 from audit_insight_agent.models import RuleStatus
 
@@ -13,16 +13,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_auditor_query_selects_only_relevant_rule_sources():
-    package = load_case_package(PROJECT_ROOT / "cases" / "physical_currency_ovp")
-    selected = select_relevant_rules("Проверить только лимит ОВП", package.rules)
+    workspace = discover_workspace(PROJECT_ROOT)
+    selected = select_relevant_rules("Проверить только лимит ОВП", workspace.rules)
     assert [rule.rule_id for rule in selected] == ["OVP_LIMIT_EXCEEDED"]
 
 
-def test_physical_currency_case_runs_without_case_logic_in_core(tmp_path):
+def test_physical_currency_rules_run_on_discovered_workspace(tmp_path):
     if not (PROJECT_ROOT / "data" / "ovp" / "ovp_snapshots.csv").exists():
         pytest.skip("External synthetic data is not present in data/")
-    result, paths = AuditInsightAgent("test").run_case(
-        case_dir=PROJECT_ROOT / "cases" / "physical_currency_ovp",
+    result, paths = AuditInsightAgent("test").run_workspace(
+        workspace=discover_workspace(PROJECT_ROOT),
         auditor_query="Проверить физическую валюту, ОВП, последовательности и аномалии",
         output_root=tmp_path,
         run_id="RUN-INTEGRATION",
@@ -42,6 +42,8 @@ def test_physical_currency_case_runs_without_case_logic_in_core(tmp_path):
     assert result.findings
     assert paths["candidate_findings"].exists()
     assert paths["report"].exists()
+    assert paths["discovered_sources"].exists()
+    assert paths["profiles"].exists()
     events_path = tmp_path / "RUN-INTEGRATION" / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text("utf-8").splitlines()]
     event_names = {event["event"] for event in events}

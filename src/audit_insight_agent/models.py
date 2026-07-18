@@ -145,6 +145,7 @@ class SelfImprovementSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    review_after_every_audit: bool = False
     require_detected_gap: bool = True
     allow_blocking_clarification: bool = True
     max_changed_files: int = Field(default=20, ge=1, le=100)
@@ -281,22 +282,6 @@ class IngestionResult(BaseModel):
     registered_tables: dict[str, str] = Field(default_factory=dict)
     profiles: list[DataProfile] = Field(default_factory=list)
     indexed_chunks: int = 0
-
-
-class FeedbackForOuroboros(BaseModel):
-    """Sanitized evaluator feedback; exact case answers are intentionally absent."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: str = "1.0"
-    run_id: str
-    case_name: str
-    summary: str
-    weaknesses: list[str] = Field(default_factory=list)
-    recommendations: list[str] = Field(default_factory=list)
-    aggregate_metrics: dict[str, float] = Field(default_factory=dict)
-    previous_run_id: str | None = None
-    quality_improved: bool | None = None
 
 
 class RelationshipKey(BaseModel):
@@ -483,7 +468,7 @@ class EvidenceReference(BaseModel):
 class CandidateFinding(BaseModel):
     """
     Структурированное аудиторское наблюдение.
-    Именно эти объекты проверяет evaluator.
+    Машиночитаемый аудиторский вывод.
     """
 
     model_config = ConfigDict(
@@ -593,7 +578,6 @@ class AgentRunResult(BaseModel):
     data_root: str
     data_sources: list[DataSource]
 
-    case_name: str | None = None
     auditor_query: str | None = None
     rule_results: list[RuleResult] = Field(default_factory=list)
 

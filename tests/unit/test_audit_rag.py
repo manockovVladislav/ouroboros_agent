@@ -21,7 +21,7 @@ def test_completed_run_is_grounded_with_document_chunks(tmp_path, monkeypatch):
     document = tmp_path / "policy.txt"
     document.write_text("The balance must be reconciled daily.", encoding="utf-8")
     package = SimpleNamespace(
-        root=tmp_path,
+        source_config_path=tmp_path / "sources.yaml",
         sources=SourceCatalog(
             sources=[
                 SourceConfig(
@@ -59,7 +59,6 @@ def test_completed_run_is_grounded_with_document_chunks(tmp_path, monkeypatch):
         agent_version="test",
         data_root=str(tmp_path),
         data_sources=[],
-        case_name="test",
         auditor_query="Check balances",
         findings=[finding],
     )

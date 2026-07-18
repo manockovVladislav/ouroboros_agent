@@ -1,3 +1,4 @@
+"""Restricted public gateway between Ouroboros and the universal audit core."""
 from __future__ import annotations
 
 import json
@@ -8,7 +9,6 @@ from typing import Any
 
 from .agent import AuditInsightAgent
 from .audit_rag import ground_audit_with_documents
-from .case_package import load_case_package
 from .config import load_application_settings, resolve_source_location
 from .data_loader import DuckDBTableStore, is_database_source
 from .data_profiler import profile_table
@@ -18,197 +18,67 @@ from .models import AgentRunResult, CandidateFinding
 from .report_generator import render_markdown_report
 from .retriever import BgeM3Embedder, QdrantRetriever, create_qdrant_client
 from .run_logging import RunEventLogger
+from .workspace import AuditWorkspace, discover_workspace
 
 
-"""Ограниченный публичный шлюз между Ouroboros и аудиторским ядром."""
-
-PROJECT_ROOT = (
-    Path(__file__)
-    .resolve()
-    .parents[2]
-)
-
-DEFAULT_DATA_ROOT = (
-    PROJECT_ROOT
-    / "data"
-)
-
-DEFAULT_OUTPUT_ROOT = (
-    PROJECT_ROOT
-    / "outputs"
-    / "runs"
-)
-
-DEFAULT_CASES_ROOT = PROJECT_ROOT / "cases"
-
-
-def _case_dir(case_name: str) -> Path:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", case_name):
-        raise ValueError("Некорректное имя case-пакета")
-    case_dir = _resolve_inside(DEFAULT_CASES_ROOT / case_name, DEFAULT_CASES_ROOT)
-    if not case_dir.is_dir():
-        raise FileNotFoundError(f"Case-пакет не найден: {case_name}")
-    return case_dir
-
-
-def _safe_source_overrides(
-    source_overrides: dict[str, str] | None,
-) -> dict[str, Path]:
-    return {
-        source_id: _resolve_inside(path, _allowed_data_root())
-        for source_id, path in (source_overrides or {}).items()
-    }
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_DATA_ROOT = PROJECT_ROOT / "data"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "runs"
 
 
 def _allowed_data_root() -> Path:
-
     return Path(
-        os.getenv(
-            "AUDIT_AGENT_ALLOWED_DATA_ROOT",
-            str(DEFAULT_DATA_ROOT),
-        )
+        os.getenv("AUDIT_AGENT_ALLOWED_DATA_ROOT", str(DEFAULT_DATA_ROOT))
     ).expanduser().resolve()
 
 
 def _output_root() -> Path:
-
     return Path(
-        os.getenv(
-            "AUDIT_AGENT_OUTPUT_ROOT",
-            str(DEFAULT_OUTPUT_ROOT),
-        )
+        os.getenv("AUDIT_AGENT_OUTPUT_ROOT", str(DEFAULT_OUTPUT_ROOT))
     ).expanduser().resolve()
 
 
-def _resolve_inside(
-    candidate: str | Path,
-    allowed_root: Path,
-) -> Path:
-
-    resolved = Path(
-        candidate
-    ).expanduser().resolve()
-
-    if (
-        resolved != allowed_root
-        and allowed_root
-        not in resolved.parents
-    ):
-        raise PermissionError(
-            f"Путь находится вне разрешенного "
-            f"каталога: {resolved}"
-        )
-
+def _resolve_inside(candidate: str | Path, allowed_root: Path) -> Path:
+    resolved = Path(candidate).expanduser().resolve()
+    if resolved != allowed_root and allowed_root not in resolved.parents:
+        raise PermissionError(f"Путь находится вне разрешенного каталога: {resolved}")
     return resolved
 
 
-def _validate_run_id(
-    run_id: str | None,
-) -> str | None:
-
+def _validate_run_id(run_id: str | None) -> str | None:
     if run_id is None:
         return None
-
-    if not re.fullmatch(
-        r"[A-Za-z0-9_.-]{1,80}",
-        run_id,
-    ):
-        raise ValueError(
-            "Некорректный run_id"
-        )
-
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", run_id):
+        raise ValueError("Некорректный run_id")
     return run_id
 
 
-def run_audit(
-    data_dir: str,
-    run_id: str | None = None,
-) -> dict[str, Any]:
-    """
-    Запускает полный анализ публичных данных.
-
-    Доступен Ouroboros.
-    """
-
-    allowed_root = (
-        _allowed_data_root()
-    )
-
-    resolved_data_dir = (
-        _resolve_inside(
-            candidate=data_dir,
-            allowed_root=allowed_root,
-        )
-    )
-
-    validated_run_id = (
-        _validate_run_id(
-            run_id
-        )
-    )
-
-    agent = AuditInsightAgent()
-
-    result, paths = agent.run(
-        data_dir=resolved_data_dir,
-        output_root=_output_root(),
-        run_id=validated_run_id,
-    )
-    if result.case_name:
-        package = load_case_package(_case_dir(result.case_name))
-        settings_file = Path(
-            os.getenv("AUDIT_INSIGHT_CONFIG", str(PROJECT_ROOT / "configs/config.yaml"))
-        ).expanduser().resolve()
-        result, paths = ground_audit_with_documents(
-            result=result,
-            paths=paths,
-            package=package,
-            settings=load_application_settings(settings_file),
-            project_root=PROJECT_ROOT,
-            auditor_query="Выполнить полный аудит всех доступных данных",
-        )
-
-    return {
-        "run_id": result.run_id,
-        "status": result.status.value,
-        "findings_count": len(
-            result.findings
-        ),
-        "execution_errors_count": len(
-            result.execution_errors
-        ),
-        "candidate_findings_path": str(
-            paths[
-                "candidate_findings"
-            ]
-        ),
-        "report_path": str(
-            paths["report"]
-        ),
-        "run_manifest_path": str(
-            paths["run_manifest"]
-        ),
-        "rag_context_path": str(paths["rag_context"]) if "rag_context" in paths else None,
-    }
+def _application_settings():
+    settings_file = Path(
+        os.getenv("AUDIT_INSIGHT_CONFIG", str(PROJECT_ROOT / "configs/config.yaml"))
+    ).expanduser().resolve()
+    return load_application_settings(settings_file)
 
 
-def run_case_audit(
-    case_name: str,
-    auditor_query: str,
-    run_id: str | None = None,
-) -> dict[str, Any]:
-    """Run an allowlisted declarative case package for an auditor request."""
-
-    return run_full_audit(case_name, auditor_query, run_id=run_id)
+def _workspace(data_root: str | Path | None = None) -> AuditWorkspace:
+    data = _resolve_inside(data_root or _allowed_data_root(), _allowed_data_root())
+    return discover_workspace(PROJECT_ROOT, data_root=data)
 
 
-def list_data_sources(case_name: str) -> list[dict[str, Any]]:
-    """List configured inputs without exposing file contents."""
+def _validate_replica_name(settings, replica_name: str | None) -> str | None:
+    if replica_name is None:
+        return None
+    if replica_name not in settings.databases.connections:
+        raise ValueError(f"Unknown database replica: {replica_name}")
+    return replica_name
 
-    package = load_case_package(_case_dir(case_name))
-    config_path = package.root / "data_sources.yaml"
+
+def list_data_sources() -> list[dict[str, Any]]:
+    """Discover current data/, knowledge/ and configured SQL sources."""
+
+    workspace = _workspace()
     result = []
-    for source in package.sources.sources:
+    for source in workspace.sources.sources:
         if is_database_source(source):
             result.append(
                 {
@@ -225,7 +95,7 @@ def list_data_sources(case_name: str) -> list[dict[str, Any]]:
                 }
             )
             continue
-        path = resolve_source_location(source, config_path)
+        path = resolve_source_location(source, workspace.source_config_path)
         result.append(
             {
                 "source_id": source.source_id,
@@ -242,27 +112,25 @@ def list_data_sources(case_name: str) -> list[dict[str, Any]]:
 
 
 def profile_data_source(
-    case_name: str, source_id: str, replica_name: str | None = None
+    source_id: str, replica_name: str | None = None
 ) -> dict[str, Any]:
-    """Profile one configured table through DuckDB."""
+    """Profile one automatically discovered table through DuckDB."""
 
-    package = load_case_package(_case_dir(case_name))
+    workspace = _workspace()
     source = next(
-        (item for item in package.sources.sources if item.source_id == source_id),
-        None,
+        (item for item in workspace.sources.sources if item.source_id == source_id), None
     )
     if source is None:
         raise ValueError(f"Неизвестный source_id: {source_id}")
     if source.source_type != "table":
         raise ValueError(f"Источник не является таблицей: {source_id}")
-    config_path = package.root / "data_sources.yaml"
     settings = _application_settings()
     selected_replica = _validate_replica_name(settings, replica_name)
     with DuckDBTableStore(
         database_settings=settings.databases,
         selected_replica=selected_replica,
     ) as store:
-        store.ingest(source, config_path)
+        store.ingest(source, workspace.source_config_path)
         return profile_table(store, source).model_dump(mode="json")
 
 
@@ -271,8 +139,6 @@ def search_documents(
     limit: int = 5,
     settings_path: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Search the existing Qdrant knowledge index using configured BGE-M3."""
-
     if not query.strip() or len(query) > 4000:
         raise ValueError("Поисковый запрос должен содержать от 1 до 4000 символов")
     settings_file = Path(
@@ -294,76 +160,110 @@ def search_documents(
     return [item.model_dump(mode="json") for item in retriever.search(query, limit)]
 
 
-def run_rule(
-    case_name: str,
-    rule_id: str,
-    auditor_query: str = "Запуск выбранного правила",
-    run_id: str | None = None,
-    source_overrides: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    return _run_selected_rules(
-        case_name,
-        {rule_id},
-        auditor_query,
-        run_id,
-        source_overrides,
-    )
-
-
-def run_rule_group(
-    case_name: str,
-    tag: str,
+def _execute(
     auditor_query: str,
+    *,
     run_id: str | None = None,
-    source_overrides: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    package = load_case_package(_case_dir(case_name))
-    rule_ids = {rule.rule_id for rule in package.rules if tag in rule.tags and rule.enabled}
-    if not rule_ids:
-        raise ValueError(f"Группа правил не найдена: {tag}")
-    return _run_selected_rules(
-        case_name,
-        rule_ids,
-        auditor_query,
-        run_id,
-        source_overrides,
-    )
-
-
-def _run_selected_rules(
-    case_name: str,
-    rule_ids: set[str],
-    auditor_query: str,
-    run_id: str | None,
-    source_overrides: dict[str, str] | None,
-) -> dict[str, Any]:
-    result, paths = AuditInsightAgent(agent_version="0.3.0").run_case(
-        case_dir=_case_dir(case_name),
+    rule_ids: set[str] | None = None,
+    replica_name: str | None = None,
+    data_root: str | Path | None = None,
+    include_rag: bool = True,
+) -> tuple[AgentRunResult, dict[str, Path]]:
+    if not auditor_query.strip() or len(auditor_query) > 4000:
+        raise ValueError("Запрос аудитора должен содержать от 1 до 4000 символов")
+    workspace = _workspace(data_root)
+    settings = _application_settings()
+    selected_replica = _validate_replica_name(settings, replica_name)
+    result, paths = AuditInsightAgent(agent_version="0.4.0").run_workspace(
+        workspace=workspace,
         auditor_query=auditor_query,
         output_root=_output_root(),
         run_id=_validate_run_id(run_id),
-        source_overrides=_safe_source_overrides(source_overrides),
         selected_rule_ids=rule_ids,
+        settings=settings,
+        selected_replica=selected_replica,
+    )
+    if include_rag:
+        try:
+            result, paths = ground_audit_with_documents(
+                result=result,
+                paths=paths,
+                package=workspace,
+                settings=settings,
+                project_root=PROJECT_ROOT,
+                auditor_query=auditor_query,
+            )
+        except Exception as error:
+            RunEventLogger(Path(paths["candidate_findings"]).parent, result.run_id).exception(
+                "audit_failed", error, phase="rag"
+            )
+            raise
+    return result, paths
+
+
+def run_audit(data_dir: str, run_id: str | None = None) -> dict[str, Any]:
+    result, paths = _execute(
+        "Выполнить полный аудит всех доступных данных",
+        run_id=run_id,
+        data_root=data_dir,
+    )
+    return _run_payload(result, paths)
+
+
+def run_rule(
+    rule_id: str,
+    auditor_query: str = "Запуск выбранного правила",
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    result, paths = _execute(
+        auditor_query, run_id=run_id, rule_ids={rule_id}, include_rag=False
+    )
+    return _run_payload(result, paths)
+
+
+def run_rule_group(
+    tag: str,
+    auditor_query: str,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    workspace = _workspace()
+    rule_ids = {
+        rule.rule_id for rule in workspace.rules if tag in rule.tags and rule.enabled
+    }
+    if not rule_ids:
+        raise ValueError(f"Группа правил не найдена: {tag}")
+    result, paths = _execute(
+        auditor_query, run_id=run_id, rule_ids=rule_ids, include_rag=False
+    )
+    return _run_payload(result, paths)
+
+
+def run_full_audit(
+    auditor_query: str,
+    run_id: str | None = None,
+    replica_name: str | None = None,
+) -> dict[str, Any]:
+    """Primary API: discover inputs, profile, execute rules, RAG and report."""
+
+    result, paths = _execute(
+        auditor_query, run_id=run_id, replica_name=replica_name
     )
     return _run_payload(result, paths)
 
 
 def build_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Validate and deduplicate candidate findings without file access."""
-
     validated = [CandidateFinding.model_validate(item) for item in findings]
     return [item.model_dump(mode="json") for item in deduplicate_findings(validated)]
 
 
 def generate_report(run_id: str) -> dict[str, Any]:
-    """Regenerate report.md strictly from a validated run result."""
-
     validated_run_id = _validate_run_id(run_id)
     if validated_run_id is None:
         raise ValueError("run_id обязателен")
     run_dir = _resolve_inside(_output_root() / validated_run_id, _output_root())
-    candidate_path = run_dir / "candidate_findings.json"
-    result = AgentRunResult.model_validate_json(candidate_path.read_text(encoding="utf-8"))
+    result = AgentRunResult.model_validate_json(
+        (run_dir / "candidate_findings.json").read_text(encoding="utf-8")
+    )
     report_path = run_dir / "report.md"
     temporary = report_path.with_suffix(".md.tmp")
     temporary.write_text(render_markdown_report(result), encoding="utf-8")
@@ -371,67 +271,10 @@ def generate_report(run_id: str) -> dict[str, Any]:
     return {"run_id": validated_run_id, "report_path": str(report_path)}
 
 
-def run_full_audit(
-    case_name: str,
-    auditor_query: str,
-    run_id: str | None = None,
-    source_overrides: dict[str, str] | None = None,
-    replica_name: str | None = None,
-) -> dict[str, Any]:
-    """Primary API: auditor request to findings, Evidence and report."""
-
-    if not auditor_query.strip() or len(auditor_query) > 4000:
-        raise ValueError("Запрос аудитора должен содержать от 1 до 4000 символов")
-    case_dir = _case_dir(case_name)
-    package = load_case_package(case_dir)
-    settings = _application_settings()
-    selected_replica = _validate_replica_name(settings, replica_name)
-    result, paths = AuditInsightAgent(agent_version="0.3.0").run_case(
-        case_dir=case_dir,
-        auditor_query=auditor_query,
-        output_root=_output_root(),
-        run_id=_validate_run_id(run_id),
-        source_overrides=_safe_source_overrides(source_overrides),
-        settings=settings,
-        selected_replica=selected_replica,
-    )
-    try:
-        result, paths = ground_audit_with_documents(
-            result=result,
-            paths=paths,
-            package=package,
-            settings=settings,
-            project_root=PROJECT_ROOT,
-            auditor_query=auditor_query,
-        )
-    except Exception as error:
-        RunEventLogger(
-            Path(paths["candidate_findings"]).parent, result.run_id
-        ).exception("audit_failed", error, phase="rag")
-        raise
-    return _run_payload(result, paths)
-
-
-def _application_settings():
-    settings_file = Path(
-        os.getenv("AUDIT_INSIGHT_CONFIG", str(PROJECT_ROOT / "configs/config.yaml"))
-    ).expanduser().resolve()
-    return load_application_settings(settings_file)
-
-
-def _validate_replica_name(settings, replica_name: str | None) -> str | None:
-    if replica_name is None:
-        return None
-    if replica_name not in settings.databases.connections:
-        raise ValueError(f"Unknown database replica: {replica_name}")
-    return replica_name
-
-
 def _run_payload(result: AgentRunResult, paths: dict[str, Path]) -> dict[str, Any]:
     payload = {
         "run_id": result.run_id,
         "status": result.status.value,
-        "case_name": result.case_name,
         "findings_count": len(result.findings),
         "findings": [item.model_dump(mode="json") for item in result.findings],
         "finding_reviews": [
@@ -444,62 +287,31 @@ def _run_payload(result: AgentRunResult, paths: dict[str, Path]) -> dict[str, An
         "report_path": str(paths["report"]),
         "run_manifest_path": str(paths["run_manifest"]),
     }
+    for name in ("discovered_sources", "profiles", "relationships", "selected_rules"):
+        if name in paths:
+            payload[f"{name}_path"] = str(paths[name])
     if "rag_context" in paths:
         payload["rag_context_path"] = str(paths["rag_context"])
     return payload
 
 
 def get_evidence(run_id: str, evidence_id: str) -> dict[str, Any]:
-    """Return a checksum-verified evidence record through the public gateway."""
-
     validated_run_id = _validate_run_id(run_id)
     if validated_run_id is None:
         raise ValueError("run_id обязателен")
     evidence_root = _resolve_inside(
-        _output_root() / validated_run_id / "evidence",
-        _output_root(),
+        _output_root() / validated_run_id / "evidence", _output_root()
     )
     return EvidenceStore(evidence_root).get(evidence_id).model_dump(mode="json")
 
 
-def get_run_summary(
-    run_id: str,
-) -> dict[str, Any]:
-    """
-    Возвращает только безопасную сводку запуска.
-    """
-
-    validated_run_id = (
-        _validate_run_id(
-            run_id
-        )
-    )
-
+def get_run_summary(run_id: str) -> dict[str, Any]:
+    validated_run_id = _validate_run_id(run_id)
     if validated_run_id is None:
-        raise ValueError(
-            "run_id обязателен"
-        )
-
-    manifest_path = (
-        _output_root()
-        / validated_run_id
-        / "run_manifest.json"
+        raise ValueError("run_id обязателен")
+    manifest = _resolve_inside(
+        _output_root() / validated_run_id / "run_manifest.json", _output_root()
     )
-
-    resolved_manifest = (
-        _resolve_inside(
-            candidate=manifest_path,
-            allowed_root=_output_root(),
-        )
-    )
-
-    if not resolved_manifest.exists():
-        raise FileNotFoundError(
-            f"Запуск не найден: {run_id}"
-        )
-
-    return json.loads(
-        resolved_manifest.read_text(
-            encoding="utf-8",
-        )
-    )
+    if not manifest.exists():
+        raise FileNotFoundError(f"Запуск не найден: {run_id}")
+    return json.loads(manifest.read_text(encoding="utf-8"))

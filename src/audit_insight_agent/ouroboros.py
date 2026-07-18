@@ -16,7 +16,6 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .config import load_application_settings
-from .evaluator_adapter import run_external_evaluator
 from .models import AgentRunResult, ApplicationSettings
 from .report_generator import refresh_run_manifest_files
 from .run_logging import RunEventLogger, append_jsonl, utc_now, write_chat_history
@@ -161,22 +160,20 @@ class OuroborosOrchestrator:
         )
         self.result_loader = result_loader or self._load_result
 
-    def run(self, user_request: str, case_name: str) -> dict[str, Any]:
+    def run(self, user_request: str) -> dict[str, Any]:
         result: dict[str, Any] | None = None
-        for event in self.run_with_updates(user_request, case_name):
+        for event in self.run_with_updates(user_request):
             if event["kind"] == "result":
                 result = event["result"]
         if result is None:
             raise RuntimeError("Ouroboros не вернул результат аудита")
         return result
 
-    def run_with_updates(
-        self, user_request: str, case_name: str
-    ) -> Iterator[dict[str, Any]]:
+    def run_with_updates(self, user_request: str) -> Iterator[dict[str, Any]]:
         yield {"kind": "status", "message": "Проверка соединения с Ouroboros…"}
         self.logger.info("Checking Ouroboros health at %s", self.settings.ouroboros.url)
         self.client.health()
-        request_path = self._write_task_request(user_request, case_name)
+        request_path = self._write_task_request(user_request)
         request_events = request_path.with_suffix(".events.jsonl")
         append_jsonl(
             request_events,
@@ -184,7 +181,6 @@ class OuroborosOrchestrator:
                 "timestamp": utc_now(),
                 "event": "web_request_received",
                 "request_id": request_path.stem,
-                "case_name": case_name,
                 "auditor_query_length": len(user_request),
             },
         )
@@ -294,17 +290,10 @@ class OuroborosOrchestrator:
                     else ""
                 )
                 run_dir = Path(result["candidate_findings_path"]).parent
-                result["evaluation"] = run_external_evaluator(
-                    case_name=case_name,
-                    run_id=run_id,
-                    candidate_findings=result["candidate_findings_path"],
-                    run_dir=run_dir,
-                )
                 result["answer"] = self._answer(result)
                 chat_path = write_chat_history(
                     run_dir,
                     run_id=run_id,
-                    case_name=case_name,
                     task_id=task_id,
                     user_request=user_request,
                     ouroboros_answer=result["answer"],
@@ -327,7 +316,7 @@ class OuroborosOrchestrator:
             f"{self.settings.ouroboros.timeout_seconds} секунд"
         )
 
-    def _write_task_request(self, user_request: str, case_name: str) -> Path:
+    def _write_task_request(self, user_request: str) -> Path:
         request_root = PROJECT_ROOT / "outputs" / "requests"
         request_root.mkdir(parents=True, exist_ok=True)
         path = request_root / f"REQ-{uuid.uuid4().hex}.json"
@@ -338,7 +327,6 @@ class OuroborosOrchestrator:
                 {
                     "request_id": path.stem,
                     "created_at": utc_now(),
-                    "case_name": case_name,
                     "auditor_query": user_request,
                     "replica_name": replica_name,
                 },
@@ -382,7 +370,7 @@ class OuroborosOrchestrator:
         selected_replica = request_payload.get("replica_name") or "не указана"
         clarification_enabled = self.settings.self_improvement.allow_blocking_clarification
         return f"""Ты выступаешь как аудитор и главный оркестратор Audit Insight Agent.
-Это боевой запуск: не изменяй код, правила, конфигурацию и evaluator.
+Это боевой запуск: не изменяй код, правила или конфигурацию.
 Снача изучи описания источников, имена файлов, схемы и документы knowledge.
 Не задавай вопросы о формате отчёта, методе или несущественных деталях: прими разумное
 допущение и продолжай. Один вопрос разрешён только до расчётов, если назначение данных нельзя установить
@@ -496,6 +484,10 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
         rag_context = run_dir / "rag_context.json"
         if rag_context.is_file():
             paths["rag_context"] = rag_context
+        for name in ("discovered_sources", "profiles", "relationships", "selected_rules"):
+            artifact = run_dir / f"{name}.json"
+            if artifact.is_file():
+                paths[name] = artifact
         return _run_payload(result, paths)
 
     @staticmethod
@@ -538,9 +530,4 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
         errors = result.get("execution_errors", [])
         if errors:
             lines.append(f"Ошибок выполнения: {len(errors)}. Подробности сохранены в отчёте.")
-        evaluation = result.get("evaluation", {})
-        if evaluation.get("status") == "NOT_CONFIGURED":
-            lines.append("Внешний audit-evaluator не настроен для этого окружения.")
-        elif evaluation.get("status") == "COMPLETED":
-            lines.append("Внешняя оценка завершена; обезличенная обратная связь доступна developer API.")
         return "\n\n".join(lines)

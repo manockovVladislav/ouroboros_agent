@@ -65,8 +65,6 @@ def render_markdown_report(
         "",
     ]
 
-    if result.case_name:
-        lines.insert(3, f"- Case: `{result.case_name}`")
     if result.auditor_query:
         lines.extend(["## Auditor request", "", result.auditor_query, ""])
 
@@ -331,6 +329,10 @@ def write_run_outputs(
         ("events", "events.jsonl"),
         ("rag_context", "rag_context.json"),
         ("chat", "chat.json"),
+        ("discovered_sources", "discovered_sources.json"),
+        ("relationships", "relationships.json"),
+        ("selected_rules", "selected_rules.json"),
+        ("profiles", "profiles.json"),
     ):
         if (output_path / filename).is_file():
             manifest["files"][name] = filename

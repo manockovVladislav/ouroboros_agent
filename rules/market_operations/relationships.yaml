@@ -1,0 +1,9 @@
+version: 1
+relationships:
+  - relationship_id: order_to_robot_limit
+    left_source: robot_orders
+    right_source: robot_limits
+    cardinality: many_to_one
+    keys:
+      - left: robot_id
+        right: robot_id

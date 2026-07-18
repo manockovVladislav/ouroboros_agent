@@ -28,13 +28,11 @@ def _load_request(path_value: str) -> dict[str, str]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("Audit request must be a JSON object")
-    case_name = str(raw.get("case_name") or "").strip()
     auditor_query = str(raw.get("auditor_query") or "").strip()
     replica_name = str(raw.get("replica_name") or "").strip()
-    if not case_name or not auditor_query:
-        raise ValueError("case_name and auditor_query are required")
+    if not auditor_query:
+        raise ValueError("auditor_query is required")
     return {
-        "case_name": case_name,
         "auditor_query": auditor_query,
         "replica_name": replica_name,
     }
@@ -48,13 +46,12 @@ def main() -> None:
     request = _load_request(arguments.request)
     try:
         result = run_full_audit(
-            request["case_name"],
             request["auditor_query"],
             replica_name=request["replica_name"] or None,
         )
     except Exception:
         logging.getLogger("audit_insight.ouroboros_entrypoint").exception(
-            "Audit execution failed case=%s", request["case_name"]
+            "Audit execution failed"
         )
         raise
     print("AUDIT_RESULT=" + json.dumps(result, ensure_ascii=False))

@@ -13,7 +13,7 @@ from .config import load_application_settings
 from .developer_tools import (
     create_improvement_branch,
     preview_improvement,
-    read_feedback,
+    run_tests,
 )
 from .models import ApplicationSettings
 from .ouroboros import OuroborosConnectionError, OuroborosHTTPClient
@@ -62,18 +62,12 @@ class OuroborosDeveloperOrchestrator:
             status=worktree["status"],
         )
 
-        try:
-            feedback = read_feedback(validated)
-        except FileNotFoundError:
-            feedback = None
-
         yield {"kind": "status", "message": "Проверка Ouroboros server…"}
         self.client.health()
         prompt = self._task_prompt(
             user_request=user_request,
             run_id=validated,
             worktree=Path(worktree["worktree"]),
-            feedback=feedback,
         )
         created = self.client.create_task(
             prompt,
@@ -135,11 +129,31 @@ class OuroborosDeveloperOrchestrator:
                     raise PermissionError(
                         "Ouroboros changed more files than self_improvement.max_changed_files"
                     )
+                has_changes = bool(
+                    preview.get("has_changes", preview.get("changed_paths"))
+                )
+                preview["has_changes"] = has_changes
+                test_result: dict[str, Any] | None = None
+                if has_changes:
+                    yield {
+                        "kind": "status",
+                        "message": "Запуск тестов для improvement-patch…",
+                    }
+                    test_result = run_tests(validated)
+                    tests_path = development_dir / "tests.json"
+                    tests_path.write_text(
+                        json.dumps(test_result, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
                 preview.update(
                     {
                         "task_id": task_id,
                         "response": response,
                         "response_path": str(response_path),
+                        "tests_passed": (
+                            test_result["passed"] if test_result is not None else None
+                        ),
+                        "test_result": test_result,
                         "completed_at": utc_now(),
                     }
                 )
@@ -152,6 +166,7 @@ class OuroborosDeveloperOrchestrator:
                     merged=False,
                     committed=False,
                     pushed=False,
+                    tests_passed=preview["tests_passed"],
                 )
                 yield {"kind": "result", "result": preview}
                 return
@@ -183,13 +198,17 @@ class OuroborosDeveloperOrchestrator:
             "execution_errors": list(audit_result.get("execution_errors") or [])[:20],
             "findings": findings,
         }
-        task = f"""После завершённого аудита Ouroboros обнаружил системный пробел.
-Контекс аудита:
+        task = f"""Проведи обязательный post-audit review Audit Insight Agent.
+Контекст аудита:
 {json.dumps(context, ensure_ascii=False, indent=2)}
 
-Проверь, что пробел относится к общей логике, а не к конкретным значениям этого набора.
-Если вывод был ошибочным, не меняй файлы и объясни это. Иначе внеси минимальное
-универсальное изменение в код, правила, RAG или промпты и добавь тест.
+Изучи код и артефакты цикла. Отдели нарушения в данных от недостатков
+самого агента: нехватающей общей функции, слабого правила, ошибки RAG,
+неточного промпта, неполной evidence-цепочки или непокрытого тестами сценария.
+Если нашёл обоснованный системный пробел — внеси минимальное универсальное
+изменение в код, правила, RAG или промпты и обязательно добавь или обнови тест.
+Если пробела нет, не создавай фиктивные правки: оставь worktree без изменений и объясни,
+что было проверено.
 Не зашивай имена файлов, валют, портфелей или ожидаемый ответ текущего кейса."""
         yield from self.run_with_updates(task, run_id)
 
@@ -199,7 +218,6 @@ class OuroborosDeveloperOrchestrator:
         user_request: str,
         run_id: str,
         worktree: Path,
-        feedback: dict[str, Any] | None,
     ) -> str:
         python_path = Path(self.settings.ouroboros.python_executable).expanduser()
         if not python_path.is_absolute():
@@ -211,12 +229,10 @@ class OuroborosDeveloperOrchestrator:
 Задача пользователя:
 {json.dumps(user_request, ensure_ascii=False)}
 
-Обезличенная обратная связь evaluator:
-{json.dumps(feedback, ensure_ascii=False) if feedback else "отсутствует"}
-
-Разрешено изменять только: src/, rules/, cases/, tests/, docs/, prompts/,
-templates/, scripts/, README.md, pyproject.toml, requirements.txt.
-Запрещено читать или менять ground truth, evaluator, .env, secrets,
+Разрешено изменять только: src/, rules/, tests/, docs/, prompts/,
+templates/, scripts/, README.md, pyproject.toml, requirements.txt и шаблоны
+configs/config.example.yaml, configs/data_sources.example.yaml.
+Запрещено читать или менять ground truth, .env, secrets,
 configs/config.yaml, production-конфиги, data/ и knowledge/.
 Не выполняй git commit, merge, rebase, push, pull, fetch, reset и checkout.
 Не меняй исходную рабочую копию вне указанного worktree.

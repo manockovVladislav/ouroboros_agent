@@ -1,3 +1,5 @@
+# Файлы из data/ и knowledge/ обнаруживаются автоматически. Этот каталог нужен
+# только для SQL-источников или явных expected_fields/primary_key/metadata.
 version: 1
 sources:
   - source_id: operations

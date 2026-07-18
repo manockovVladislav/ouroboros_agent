@@ -17,6 +17,13 @@ DOCUMENT_FORMATS = {
     ".txt": "text",
     ".html": "html",
     ".htm": "html",
+    ".c": "source_code",
+    ".cc": "source_code",
+    ".cpp": "source_code",
+    ".h": "source_code",
+    ".hh": "source_code",
+    ".hpp": "source_code",
+    ".java": "source_code",
 }
 
 
@@ -39,7 +46,7 @@ def extract_document_text(source: SourceConfig, config_path: str | Path) -> str:
         raise FileNotFoundError(f"Document source not found: {path}")
     document_format = infer_document_format(path, source.format)
 
-    if document_format in {"text", "markdown"}:
+    if document_format in {"text", "markdown", "source_code"}:
         text = path.read_text(encoding=source.encoding)
     elif document_format == "html":
         try:

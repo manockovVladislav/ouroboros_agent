@@ -11,7 +11,7 @@ from .ouroboros import OuroborosOrchestrator
 
 
 class AuditAgentSystem:
-    """Let Ouroboros orchestrate audit first and improve only detected gaps."""
+    """Run the audit and a controlled Ouroboros capability review."""
 
     logger = logging.getLogger("audit_insight.agent_system")
 
@@ -27,11 +27,9 @@ class AuditAgentSystem:
             settings=self.settings
         )
 
-    def run_with_updates(
-        self, user_request: str, case_name: str
-    ) -> Iterator[dict[str, Any]]:
+    def run_with_updates(self, user_request: str) -> Iterator[dict[str, Any]]:
         audit_result: dict[str, Any] | None = None
-        for event in self.audit.run_with_updates(user_request, case_name):
+        for event in self.audit.run_with_updates(user_request):
             if event["kind"] == "result":
                 audit_result = event["result"]
                 continue
@@ -44,10 +42,12 @@ class AuditAgentSystem:
             audit_result.get("improvement_needed")
             or audit_result.get("execution_errors")
         )
-        should_improve = improvement.enabled and (
-            detected_gap or not improvement.require_detected_gap
+        should_review = improvement.enabled and (
+            improvement.review_after_every_audit
+            or detected_gap
+            or not improvement.require_detected_gap
         )
-        if not should_improve:
+        if not should_review:
             audit_result["self_improvement"] = {
                 "status": "NOT_REQUIRED" if improvement.enabled else "DISABLED",
                 "merged": False,
@@ -58,8 +58,8 @@ class AuditAgentSystem:
         yield {
             "kind": "status",
             "message": (
-                "Ouroboros обнаружил системный пробел. "
-                "Готовлю безопасное улучшение…"
+                "Ouroboros проводит post-audit review: ищет "
+                "пробелы в логике, правилах, RAG и промптах…"
             ),
         }
         try:
@@ -71,8 +71,13 @@ class AuditAgentSystem:
                     }
                     continue
                 has_changes = bool(event["result"].get("has_changes", True))
+                tests_passed = event["result"].get("tests_passed")
+                if has_changes and tests_passed is not True:
+                    status = "TESTS_FAILED"
+                else:
+                    status = "PATCH_READY" if has_changes else "NO_CHANGES"
                 audit_result["self_improvement"] = {
-                    "status": "PATCH_READY" if has_changes else "NO_CHANGES",
+                    "status": status,
                     **event["result"],
                 }
         except Exception as error:

@@ -119,7 +119,7 @@ def ground_audit_with_documents(
 
     run_dir = Path(paths["candidate_findings"]).parent
     event_log = RunEventLogger(run_dir, result.run_id)
-    source_config_path = package.root / "data_sources.yaml"
+    source_config_path = package.source_config_path
     document_sources = _collect_document_sources(
         package, source_config_path, project_root
     )

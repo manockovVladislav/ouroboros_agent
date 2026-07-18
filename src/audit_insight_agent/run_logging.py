@@ -94,7 +94,6 @@ def write_chat_history(
     run_dir: str | Path,
     *,
     run_id: str,
-    case_name: str,
     task_id: str,
     user_request: str,
     ouroboros_answer: str,
@@ -102,7 +101,6 @@ def write_chat_history(
     path = Path(run_dir).expanduser().resolve() / "chat.json"
     payload = {
         "run_id": run_id,
-        "case_name": case_name,
         "ouroboros_task_id": task_id,
         "saved_at": utc_now(),
         "messages": [

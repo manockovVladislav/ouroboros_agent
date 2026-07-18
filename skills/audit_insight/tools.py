@@ -3,9 +3,7 @@
 from audit_insight_agent.developer_tools import (
     apply_code_changes,
     create_improvement_branch,
-    create_patch,
     preview_improvement,
-    read_feedback,
     run_tests,
 )
 from audit_insight_agent.ouroboros_tools import (
@@ -23,12 +21,10 @@ __all__ = [
     "apply_code_changes",
     "build_findings",
     "create_improvement_branch",
-    "create_patch",
     "generate_report",
     "list_data_sources",
     "profile_data_source",
     "preview_improvement",
-    "read_feedback",
     "run_full_audit",
     "run_rule",
     "run_rule_group",
