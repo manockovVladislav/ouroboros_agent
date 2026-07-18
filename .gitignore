@@ -40,9 +40,11 @@ outputs/**
 !outputs/evidence/
 !outputs/findings/
 !outputs/reports/
+!outputs/runs/
 !outputs/evidence/.gitkeep
 !outputs/findings/.gitkeep
 !outputs/reports/.gitkeep
+!outputs/runs/.gitkeep
 
 # Real source data and knowledge documents
 data/**

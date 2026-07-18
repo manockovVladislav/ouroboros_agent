@@ -1,3 +1,10 @@
+from __future__ import annotations
+
+from .models import (
+    AuditContext,
+    CandidateFinding,
+)
+
 """Сверки показателей между наборами данных и источниками.
 
 Планируемые проверки:
@@ -8,3 +15,12 @@
 TODO: определить ключи сопоставления, допуски, обработку неполных данных и
 формат доказательств для каждой сверки.
 """
+
+def run_reconciliations(
+    context: AuditContext,
+) -> list[CandidateFinding]:
+    """
+    Сверки между разными источниками.
+    """
+
+    return []
