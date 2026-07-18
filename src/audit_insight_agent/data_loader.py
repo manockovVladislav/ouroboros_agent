@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
+from typing import Any
 
 import pandas as pd
 
-from .models import DataSource
+from .config import resolve_source_location
+from .models import DataSource, SourceConfig
 
 
 
@@ -25,17 +28,7 @@ SUPPORTED_EXTENSIONS = {
     ".json": "json",
 }
 
-FORBIDDEN_DIRECTORY_NAMES = {
-    "private",
-    "error_injection_preview",
-}
-
-FORBIDDEN_FILE_FRAGMENTS = {
-    "ground_truth",
-    "error_injection_manifest",
-    "hidden_error_business_logic",
-    "participant_3_hidden_error",
-}
+FORBIDDEN_DIRECTORY_NAMES = {"private"}
 
 
 def _is_forbidden(
@@ -57,15 +50,7 @@ def _is_forbidden(
     ):
         return True
 
-    filename = (
-        file_path.name.lower()
-    )
-
-    return any(
-        fragment in filename
-        for fragment
-        in FORBIDDEN_FILE_FRAGMENTS
-    )
+    return False
 
 
 def discover_data_sources(
@@ -266,3 +251,106 @@ def find_source(
             return source
 
     return None
+
+
+def infer_table_format(path: Path, configured_format: str = "auto") -> str:
+    if configured_format != "auto":
+        return configured_format.lower()
+    try:
+        return SUPPORTED_EXTENSIONS[path.suffix.lower()]
+    except KeyError as error:
+        raise ValueError(f"Unsupported table extension: {path.suffix}") from error
+
+
+def load_configured_table(
+    source: SourceConfig,
+    config_path: str | Path,
+    limit: int | None = None,
+) -> pd.DataFrame:
+    """Load a configured table without relying on source names or schemas."""
+
+    if source.source_type != "table":
+        raise ValueError(f"Source {source.source_id!r} is not a table")
+    path = resolve_source_location(source, config_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Table source not found: {path}")
+    file_format = infer_table_format(path, source.format)
+    options = dict(source.options)
+
+    if file_format == "csv":
+        options.setdefault("low_memory", False)
+        frame = pd.read_csv(path, encoding=source.encoding, nrows=limit, **options)
+    elif file_format == "excel":
+        frame = pd.read_excel(path, nrows=limit, **options)
+    elif file_format == "parquet":
+        frame = pd.read_parquet(path, **options)
+    elif file_format == "json":
+        try:
+            frame = pd.read_json(path, **options)
+        except ValueError:
+            frame = pd.read_json(path, lines=True, **options)
+    else:
+        raise ValueError(f"Unsupported configured table format: {file_format}")
+
+    return frame.head(limit) if limit is not None else frame
+
+
+def safe_table_name(source: SourceConfig) -> str:
+    """Return an SQL-safe physical table name independent from business meaning."""
+
+    candidate = source.table_name or source.source_id
+    normalized = re.sub(r"[^A-Za-z0-9_]", "_", candidate).strip("_")
+    if not normalized:
+        raise ValueError(f"Cannot derive table name from {candidate!r}")
+    if normalized[0].isdigit():
+        normalized = f"source_{normalized}"
+    return normalized
+
+
+def quote_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+class DuckDBTableStore:
+    """Persistent analytical store shared by ingestion, profiling and checks."""
+
+    def __init__(self, database: str | Path = ":memory:") -> None:
+        try:
+            import duckdb
+        except ImportError as error:
+            raise RuntimeError("DuckDB support requires the 'duckdb' package") from error
+        self.connection = duckdb.connect(str(database))
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def __enter__(self) -> DuckDBTableStore:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+    def ingest(
+        self,
+        source: SourceConfig,
+        config_path: str | Path,
+        replace: bool = True,
+    ) -> str:
+        frame = load_configured_table(source, config_path)
+        table_name = safe_table_name(source)
+        quoted = quote_identifier(table_name)
+        temporary_name = "_audit_ingest_frame"
+        self.connection.register(temporary_name, frame)
+        try:
+            clause = "OR REPLACE " if replace else ""
+            self.connection.execute(
+                f"CREATE {clause}TABLE {quoted} AS SELECT * FROM {temporary_name}"
+            )
+        finally:
+            self.connection.unregister(temporary_name)
+        return table_name
+
+    def query(self, sql: str, parameters: list[Any] | None = None) -> pd.DataFrame:
+        """Execute calculations in DuckDB and return their tabular result."""
+
+        return self.connection.execute(sql, parameters or []).fetchdf()

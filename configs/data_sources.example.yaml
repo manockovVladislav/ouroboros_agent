@@ -1,7 +1,21 @@
-# Пример описания источников без учётных данных и реальных путей.
+version: 1
 sources:
-  - id: sample_transactions
-    kind: csv
-    location: data/sample/transactions.csv
-    purpose: synthetic_test_fixture
-    # TODO: определить схему, ключи, кодировку и правила доступа.
+  - source_id: operations
+    source_type: table
+    location: ../data/sample/operations.csv
+    format: auto
+    table_name: operations
+    expected_fields: [operation_id, operation_date, amount]
+    primary_key: [operation_id]
+    encoding: utf-8
+    options: {}
+    metadata:
+      owner: finance
+
+  - source_id: audit_methodology
+    source_type: document
+    location: ../knowledge/documents/methodology.pdf
+    format: auto
+    metadata:
+      document_type: methodology
+      language: ru

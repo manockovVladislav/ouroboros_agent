@@ -10,12 +10,7 @@ from .models import (
     Severity,
 )
 
-"""Формирование структурированного аудиторского наблюдения.
-
-AuditFinding должен объединять факт, критерий, риск, нормативное основание,
-доказательства и рекомендацию. TODO: определить обязательность полей,
-проверку ссылок на Evidence и границы участия LLM в формулировках.
-"""
+"""Сборка валидированных аудиторских выводов и их дедупликация."""
 
 
 
@@ -49,6 +44,8 @@ def build_finding(
     title: str,
     summary: str,
     root_cause: str,
+    criterion: str = "",
+    risk: str = "",
     severity: Severity,
     confidence: float,
     evidence: list[EvidenceReference],
@@ -68,6 +65,8 @@ def build_finding(
         title=title,
         summary=summary,
         root_cause=root_cause,
+        criterion=criterion,
+        risk=risk,
         severity=severity,
         confidence=confidence,
         evidence=evidence,

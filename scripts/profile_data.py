@@ -1,4 +1,9 @@
-"""Будущая служебная команда профилирования выбранного набора данных.
+"""Compatibility wrapper for configuration-driven ingestion."""
+import sys
 
-TODO: использовать data_loader и data_profiler через публичные интерфейсы.
-"""
+from audit_insight_agent.cli import main
+
+
+if __name__ == "__main__":
+    sys.argv.insert(1, "ingest")
+    main()

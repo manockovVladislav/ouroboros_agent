@@ -1,0 +1,29 @@
+rule_id: CASH_SHIPMENT_SEQUENCE
+version: "1.0"
+kind: timeline
+description: Анализ временной последовательности движения физической валюты
+source_ids: [physical_cash_operations]
+tags: [физическая, валюта, последовательность, поставка]
+timeline:
+  source_id: physical_cash_operations
+  entity_fields: [shipment_id]
+  timestamp_field: operation_ts
+  event_field: operation_type
+  expected_order:
+    - SHIPMENT_REGISTERED
+    - SHIPMENT_DISPATCHED
+    - SHIPMENT_ARRIVED
+    - CASH_ACCEPTED
+    - CASH_COUNTED
+    - CASH_POSTED
+  max_gap_seconds: 604800
+finding:
+  title: Нарушена последовательность поставки {object_id}
+  summary: Этап {operation_type} не соответствует ожидаемой последовательности.
+  issue_type: invalid_event_sequence
+  root_cause: Этапы обработки или их регистрация выполнены в неверном порядке.
+  criterion: Этапы поставки должны выполняться в установленной последовательности.
+  risk: Несвоевременное или ошибочное отражение физической валюты.
+  recommendation: Проверить документы и журнал событий поставки.
+  severity: MEDIUM
+  confidence: 0.95

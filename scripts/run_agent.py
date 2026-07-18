@@ -1,9 +1,13 @@
+"""Compatibility entry point for the Audit Insight CLI."""
+import sys
+from pathlib import Path
+
+
+SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
 from audit_insight_agent.cli import main
-
-"""Точка будущего локального запуска полного сценария агента.
-
-TODO: вызывать публичный интерфейс пакета; бизнес-логику здесь не размещать.
-"""
 
 if __name__ == "__main__":
     main()

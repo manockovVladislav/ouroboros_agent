@@ -1,0 +1,20 @@
+version: 1
+relationships:
+  - relationship_id: cash_balance_to_ovp_snapshot
+    left_source: physical_cash_balances
+    right_source: ovp_snapshots
+    cardinality: many_to_many
+    keys:
+      - left: balance_ts
+        right: snapshot_ts
+      - left: currency
+        right: currency
+      - left: portfolio_id
+        right: portfolio_id
+  - relationship_id: movement_to_accounting
+    left_source: portfolio_movements
+    right_source: accounting_entries
+    cardinality: one_to_many
+    keys:
+      - left: movement_id
+        right: movement_id

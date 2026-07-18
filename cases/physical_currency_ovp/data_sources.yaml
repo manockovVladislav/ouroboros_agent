@@ -1,0 +1,107 @@
+version: 1
+sources:
+  - source_id: accounting_entries
+    source_type: table
+    location: ../../data/ovp/accounting_entries.csv
+    primary_key: [entry_id]
+  - source_id: hedge_operations
+    source_type: table
+    location: ../../data/ovp/hedge_operations.csv
+    primary_key: [hedge_id]
+  - source_id: murex_deals_replica
+    source_type: table
+    location: ../../data/ovp/murex_deals_replica.csv
+    primary_key: [murex_trade_id]
+  - source_id: ovp_limits
+    source_type: table
+    location: ../../data/ovp/ovp_limits.csv
+    primary_key: [limit_id]
+  - source_id: ovp_snapshots
+    source_type: table
+    location: ../../data/ovp/ovp_snapshots.csv
+    primary_key: [snapshot_id]
+  - source_id: physical_cash_balances
+    source_type: table
+    location: ../../data/ovp/physical_cash_balances.csv
+    primary_key: [balance_snapshot_id]
+  - source_id: physical_cash_operations
+    source_type: table
+    location: ../../data/ovp/physical_cash_operations.csv
+    primary_key: [cash_operation_id]
+  - source_id: portfolio_mapping_rules
+    source_type: table
+    location: ../../data/ovp/portfolio_mapping_rules.csv
+    primary_key: [mapping_rule_id]
+  - source_id: portfolio_movements
+    source_type: table
+    location: ../../data/ovp/portfolio_movements.csv
+    primary_key: [movement_id]
+  - source_id: portfolio_reference
+    source_type: table
+    location: ../../data/ovp/portfolio_reference.csv
+    primary_key: [portfolio_id]
+
+  - source_id: policy_ovp_management
+    source_type: document
+    location: ../../data/ovp/01_Положение_об_управлении_открытой_валютной_позицией.docx
+    metadata: {document_type: internal_policy, topic: ovp}
+  - source_id: policy_ovp_limits
+    source_type: document
+    location: ../../data/ovp/02_Положение_о_лимитах_открытых_валютных_позиций.docx
+    metadata: {document_type: internal_policy, topic: limits}
+  - source_id: policy_currency_deals
+    source_type: document
+    location: ../../data/ovp/03_Порядок_учета_валютных_сделок.docx
+    metadata: {document_type: internal_policy, topic: deals}
+  - source_id: policy_physical_cash
+    source_type: document
+    location: ../../data/ovp/04_Порядок_учета_физической_валюты.docx
+    metadata: {document_type: internal_policy, topic: cash}
+  - source_id: policy_portfolio_movements
+    source_type: document
+    location: ../../data/ovp/05_Порядок_движения_валюты_между_портфелями.docx
+    metadata: {document_type: internal_policy, topic: portfolios}
+  - source_id: reference_currency_portfolios
+    source_type: document
+    location: ../../data/ovp/06_Справочник_валютных_портфелей.docx
+    metadata: {document_type: reference, topic: portfolios}
+  - source_id: policy_hedging
+    source_type: document
+    location: ../../data/ovp/08_Регламент_хеджирующих_операций.docx
+    metadata: {document_type: internal_policy, topic: hedging}
+  - source_id: policy_revaluation
+    source_type: document
+    location: ../../data/ovp/09_Порядок_переоценки_валютных_остатков.docx
+    metadata: {document_type: internal_policy, topic: revaluation}
+  - source_id: policy_limit_control
+    source_type: document
+    location: ../../data/ovp/10_Регламент_контроля_превышения_лимитов_ОВП.docx
+    metadata: {document_type: internal_policy, topic: limits}
+  - source_id: policy_error_corrections
+    source_type: document
+    location: ../../data/ovp/11_Порядок_исправления_ошибочных_проводок_и_портфельных_отражений.docx
+    metadata: {document_type: internal_policy, topic: corrections}
+  - source_id: policy_cash_reconciliation
+    source_type: document
+    location: ../../data/ovp/12_Регламент_сверки_кассы_и_системного_учета.docx
+    metadata: {document_type: internal_policy, topic: reconciliation}
+  - source_id: policy_currency_in_transit
+    source_type: document
+    location: ../../data/ovp/13_Порядок_учета_валюты_в_пути.docx
+    metadata: {document_type: internal_policy, topic: cash}
+  - source_id: policy_day_close
+    source_type: document
+    location: ../../data/ovp/14_Регламент_закрытия_операционного_дня_по_валютным_операциям_и_ОВП.docx
+    metadata: {document_type: internal_policy, topic: closing}
+  - source_id: policy_mapping_quality
+    source_type: document
+    location: ../../data/ovp/15_Регламент_контроля_качества_справочников_и_mapping_правил.docx
+    metadata: {document_type: internal_policy, topic: data_quality}
+  - source_id: regulation_6896_u
+    source_type: document
+    location: ../../data/ovp/6896_U_27012025.pdf
+    metadata: {document_type: regulation, topic: ovp}
+  - source_id: regulation_ves_110804043
+    source_type: document
+    location: ../../data/ovp/ves110804043.pdf
+    metadata: {document_type: regulation, topic: currency_operations}

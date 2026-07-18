@@ -1,1 +1,10 @@
-{# TODO: шаблон AuditFinding: факт, критерий, риск, основание, доказательства и рекомендация. #}
+### {{ finding.finding_id }}: {{ finding.title }}
+
+- Severity: `{{ finding.severity.value }}`
+- Confidence: `{{ "%.2f"|format(finding.confidence) }}`
+
+{{ finding.summary }}
+
+**Criterion:** {{ finding.criterion }}
+
+**Risk:** {{ finding.risk }}

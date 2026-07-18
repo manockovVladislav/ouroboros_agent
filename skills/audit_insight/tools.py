@@ -1,13 +1,35 @@
-"""Контракты ограниченных инструментов навыка Audit Insight.
+"""Explicit allowlist of tools exposed to Ouroboros."""
 
-В будущем здесь должны быть доступны только фасады:
-- profile_dataset();
-- run_audit_rule();
-- search_documents();
-- get_evidence();
-- build_finding();
-- generate_report().
+from audit_insight_agent.developer_tools import (
+    apply_code_changes,
+    create_improvement_branch,
+    create_patch,
+    read_feedback,
+    run_tests,
+)
+from audit_insight_agent.ouroboros_tools import (
+    build_findings,
+    generate_report,
+    list_data_sources,
+    profile_data_source,
+    run_full_audit,
+    run_rule,
+    run_rule_group,
+    search_documents,
+)
 
-Реализация, прямой файловый доступ и произвольное выполнение кода на текущем
-этапе намеренно отсутствуют.
-"""
+__all__ = [
+    "apply_code_changes",
+    "build_findings",
+    "create_improvement_branch",
+    "create_patch",
+    "generate_report",
+    "list_data_sources",
+    "profile_data_source",
+    "read_feedback",
+    "run_full_audit",
+    "run_rule",
+    "run_rule_group",
+    "run_tests",
+    "search_documents",
+]

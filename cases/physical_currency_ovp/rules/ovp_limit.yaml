@@ -1,0 +1,25 @@
+rule_id: OVP_LIMIT_EXCEEDED
+version: "1.0"
+kind: sql
+description: Проверка превышения утверждённого лимита ОВП
+source_ids: [ovp_snapshots]
+tags: [овп, валюта, лимит]
+sql:
+  object_id_column: snapshot_id
+  query: >-
+    SELECT snapshot_id, snapshot_ts, currency, portfolio_id, portfolio_type,
+    total_position, limit_value, warning_threshold,
+    abs(total_position) - limit_value AS excess_amount
+    FROM {{ovp_snapshots}}
+    WHERE abs(total_position) > limit_value
+finding:
+  title: Превышен лимит ОВП для снимка {snapshot_id}
+  summary: Позиция {total_position} превышает лимит {limit_value}.
+  issue_type: limit_breach
+  root_cause: Позиция не была своевременно ограничена или захеджирована.
+  criterion: Абсолютная позиция не должна превышать утверждённый лимит.
+  risk: Валютный риск принят сверх утверждённого уровня.
+  recommendation: Исследовать позицию и процесс мониторинга лимитов.
+  severity: HIGH
+  confidence: 1.0
+  tags: [confirmed]
