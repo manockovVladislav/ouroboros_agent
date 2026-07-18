@@ -18,7 +18,7 @@ def test_auditor_query_selects_only_relevant_rule_sources():
 
 
 def test_physical_currency_case_runs_without_case_logic_in_core(tmp_path):
-    if not (PROJECT_ROOT / "data" / "ovp" / "replics" / "ovp_snapshots.csv").exists():
+    if not (PROJECT_ROOT / "data" / "ovp" / "ovp_snapshots.csv").exists():
         pytest.skip("External synthetic data is not present in data/")
     result, paths = AuditInsightAgent("test").run_case(
         case_dir=PROJECT_ROOT / "cases" / "physical_currency_ovp",

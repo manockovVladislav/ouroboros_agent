@@ -176,8 +176,3 @@ def execute_rules(
         findings.extend(rule_findings)
         results.append(result)
     return findings, results
-
-
-def run_rules(*_args, **_kwargs):
-    """Legacy hook retained for the original directory-based runner."""
-    return []

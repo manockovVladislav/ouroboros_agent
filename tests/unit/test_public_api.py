@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_public_api_lists_profiles_and_runs_one_rule(tmp_path, monkeypatch):
-    if not (PROJECT_ROOT / "data/ovp/replics/portfolio_reference.csv").exists():
+    if not (PROJECT_ROOT / "data/ovp/portfolio_reference.csv").exists():
         return
     monkeypatch.setenv("AUDIT_AGENT_OUTPUT_ROOT", str(tmp_path))
     monkeypatch.setenv("AUDIT_AGENT_ALLOWED_DATA_ROOT", str(PROJECT_ROOT / "data"))
@@ -101,5 +101,5 @@ def test_web_orchestrator_uses_external_ouroboros_task_api(tmp_path):
     events = list(orchestrator.run_with_updates("Проверить", "demo"))
 
     assert events[-1]["result"]["run_id"] == "RUN-EXTERNAL"
-    assert "run_full_audit" in fake.description
-    assert "Проверить" in fake.description
+    assert "scripts/ouroboros_audit.py" in fake.description
+    assert str(tmp_path / ".venv/bin/python") in fake.description

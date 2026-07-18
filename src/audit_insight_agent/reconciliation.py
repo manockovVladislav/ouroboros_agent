@@ -54,8 +54,3 @@ def compile_reconciliation(
         f"FROM left_data l FULL OUTER JOIN right_data r ON {join} "
         f"WHERE ABS(COALESCE(l.left_value, 0) - COALESCE(r.right_value, 0)) > {float(spec.tolerance)}"
     )
-
-
-def run_reconciliations(*_args, **_kwargs):
-    """Legacy hook retained for API compatibility; case execution uses the compiler."""
-    return []

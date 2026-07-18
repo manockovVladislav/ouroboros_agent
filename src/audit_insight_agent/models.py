@@ -9,19 +9,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-"""Единые структуры данных и контракты между модулями.
-
-TODO определить модели:
-- AuditFinding: факт, критерий, риск, основание, доказательства, рекомендация;
-- Evidence: источник, строки/фрагменты, правило, расчёт и результат;
-- RuleResult: идентификатор правила, статус, серьёзность и детали проверки;
-- DocumentChunk: фрагмент документа с метаданными и ссылкой на источник;
-- DataProfile: схема, качество, статистики и обнаруженные проблемы набора;
-- AgentRequest: входные данные, область и параметры запуска агента;
-- AgentResponse: результаты, наблюдения, доказательства и служебные метаданные.
-
-Все модули должны обмениваться этими объектами, а не несогласованными dict.
-"""
+"""Валидируемые контракты данных между модулями аудиторского ядра."""
 
 
 class Severity(str, Enum):
@@ -125,6 +113,7 @@ class OuroborosSettings(BaseModel):
 
     url: str = "http://127.0.0.1:8765"
     workspace: str = "."
+    python_executable: str = ".venv/bin/python"
     password_env: str = "OUROBOROS_NETWORK_PASSWORD"
     poll_interval_seconds: float = Field(default=1.0, ge=0.1, le=30)
     timeout_seconds: int = Field(default=900, ge=10, le=86_400)

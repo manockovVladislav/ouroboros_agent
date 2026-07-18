@@ -1,21 +1,16 @@
 from __future__ import annotations
 
 import secrets
+import os
 from datetime import (
     datetime,
     timezone,
 )
 from pathlib import Path
-from typing import Callable
-
-from .anomaly_detector import (
-    detect_anomalies,
-)
 from .case_package import load_case_package, select_relevant_rules
 from .config import resolve_source_location
 from .data_loader import (
     DuckDBTableStore,
-    discover_data_sources,
     infer_table_format,
 )
 from .evidence_store import EvidenceStore
@@ -24,38 +19,17 @@ from .finding_builder import (
 )
 from .models import (
     AgentRunResult,
-    AuditContext,
     AuditRuntimeContext,
-    CandidateFinding,
     DataSource,
     RuleStatus,
     RunStatus,
-)
-from .reconciliation import (
-    run_reconciliations,
 )
 from .report_generator import (
     write_run_outputs,
 )
 from .rule_engine import (
     execute_rules,
-    run_rules,
 )
-
-
-CheckFunction = Callable[
-    [AuditContext],
-    list[CandidateFinding],
-]
-
-"""Оркестрация полного аудиторского сценария.
-
-TODO:
-- принимать AgentRequest и возвращать AgentResponse;
-- координировать загрузку, профилирование, правила, поиск и отчётность;
-- не дублировать бизнес-логику специализированных модулей;
-- обеспечивать трассируемость каждого шага через evidence_store.
-"""
 
 
 def create_run_id() -> str:
@@ -84,23 +58,6 @@ class AuditInsightAgent:
             agent_version
         )
 
-        self.checks: list[
-            tuple[str, CheckFunction]
-        ] = [
-            (
-                "rule_engine",
-                run_rules,
-            ),
-            (
-                "reconciliation",
-                run_reconciliations,
-            ),
-            (
-                "anomaly_detector",
-                detect_anomalies,
-            ),
-        ]
-
     def run(
         self,
         data_dir: str | Path,
@@ -111,144 +68,51 @@ class AuditInsightAgent:
         dict[str, Path],
     ]:
 
-        started_at = datetime.now(
-            timezone.utc
-        )
-
-        actual_run_id = (
-            run_id
-            or create_run_id()
-        )
-
-        data_root = Path(
-            data_dir
+        data_root = Path(data_dir).expanduser().resolve()
+        if not data_root.is_dir():
+            raise NotADirectoryError(f"Data directory not found: {data_root}")
+        files_by_name = {
+            path.name: path.resolve()
+            for path in data_root.rglob("*")
+            if path.is_file()
+        }
+        cases_root = Path(
+            os.getenv(
+                "AUDIT_AGENT_CASES_ROOT",
+                str(Path(__file__).resolve().parents[2] / "cases"),
+            )
         ).expanduser().resolve()
-
-        sources = discover_data_sources(
-            data_root
-        )
-
-        context = AuditContext(
-            run_id=actual_run_id,
-            data_root=data_root,
-            data_sources=tuple(
-                sources
-            ),
-        )
-
-        findings: list[
-            CandidateFinding
-        ] = []
-
-        errors: list[str] = []
-
-        check_metrics: dict[
-            str,
-            dict[str, int | str]
-        ] = {}
-
-        for (
-            check_name,
-            check_function,
-        ) in self.checks:
-
-            try:
-                check_findings = (
-                    check_function(
-                        context
-                    )
-                )
-
-                findings.extend(
-                    check_findings
-                )
-
-                check_metrics[
-                    check_name
-                ] = {
-                    "status": "SUCCESS",
-                    "findings_count": len(
-                        check_findings
-                    ),
-                }
-
-            except Exception as error:
-
-                error_message = (
-                    f"{check_name}: "
-                    f"{type(error).__name__}: "
-                    f"{error}"
-                )
-
-                errors.append(
-                    error_message
-                )
-
-                check_metrics[
-                    check_name
-                ] = {
-                    "status": "ERROR",
-                    "findings_count": 0,
-                }
-
-        findings = deduplicate_findings(
-            findings
-        )
-
-        completed_at = datetime.now(
-            timezone.utc
-        )
-
-        if errors:
-            status = (
-                RunStatus
-                .COMPLETED_WITH_ERRORS
+        candidates = []
+        for case_dir in sorted(path for path in cases_root.iterdir() if path.is_dir()):
+            if not (case_dir / "data_sources.yaml").is_file():
+                continue
+            package = load_case_package(case_dir)
+            table_sources = [
+                source for source in package.sources.sources
+                if source.enabled and source.source_type == "table"
+            ]
+            matches = {
+                source.source_id: files_by_name[Path(source.location).name]
+                for source in table_sources
+                if Path(source.location).name in files_by_name
+            }
+            if matches:
+                candidates.append((len(matches), case_dir.name, case_dir, matches))
+        if not candidates:
+            raise ValueError(
+                f"Не найден case-пакет для файлов из {data_root}"
             )
-        else:
-            status = (
-                RunStatus.COMPLETED
-            )
-
-        result = AgentRunResult(
-            run_id=actual_run_id,
-            status=status,
-            started_at=started_at,
-            completed_at=completed_at,
-            agent_version=(
-                self.agent_version
-            ),
-            data_root=str(
-                data_root
-            ),
-            data_sources=sources,
-            findings=findings,
-            execution_errors=errors,
-            metrics={
-                "data_sources_count": len(
-                    sources
-                ),
-                "findings_count": len(
-                    findings
-                ),
-                "checks": check_metrics,
-                "duration_seconds": (
-                    completed_at
-                    - started_at
-                ).total_seconds(),
-            },
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        best_score, _, case_dir, overrides = candidates[0]
+        if len(candidates) > 1 and candidates[1][0] == best_score:
+            raise ValueError("Неоднозначный выбор case-пакета")
+        return self.run_case(
+            case_dir=case_dir,
+            auditor_query="Выполнить полный аудит всех доступных данных",
+            output_root=output_root,
+            run_id=run_id,
+            source_overrides=overrides,
         )
-
-        run_output_dir = (
-            Path(output_root)
-            / actual_run_id
-        )
-
-        paths = write_run_outputs(
-            result=result,
-            output_dir=run_output_dir,
-        )
-
-        return result, paths
 
     def run_case(
         self,

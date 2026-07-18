@@ -33,9 +33,7 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 │  ├─ data_sources.example.yaml
 │  └─ logging.yaml
 ├─ data/
-│  └─ ovp/
-│     ├─ replics/
-│     └─ vnd/
+│  └─ ovp/                     # CSV, DOCX и PDF текущей проверки
 ├─ knowledge/
 │  ├─ documents/
 │  └─ metadata/
@@ -56,6 +54,7 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 │  ├─ profile_data.py
 │  ├─ run_agent.py
 │  ├─ run_checks.py
+│  ├─ ouroboros_audit.py
 │  └─ run_web.py
 ├─ skills/audit_insight/
 │  ├─ SKILL.md
@@ -66,6 +65,7 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 │  ├─ config.py, models.py     # конфиги и контракты
 │  ├─ data_loader.py, data_profiler.py
 │  ├─ document_loader.py, ingestion.py, retriever.py
+│  ├─ audit_rag.py            # индексация и RAG-grounding выводов
 │  ├─ rule_engine.py, analysis_tools.py, anomaly_detector.py
 │  ├─ reconciliation.py, evidence_store.py, finding_builder.py
 │  ├─ report_generator.py, case_package.py
@@ -102,11 +102,13 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 
 ## Куда класть файлы
 
-- Данные конкретной проверки: `data/`. Сюда же кладутся переданные для аудита PDF, DOCX, Markdown, TXT и HTML.
+- Данные текущей проверки: `data/ovp/`. Таблицы и PDF, DOCX, Markdown, TXT, HTML могут лежать вместе.
 - Дополнительные знания и нормативные документы: `knowledge/`.
 - Описания текущих файлов и связей: `cases/physical_currency_ovp/data_sources.yaml` и `relationships.yaml`.
 - Правила текущей проверки: `cases/physical_currency_ovp/rules/`; общие группы: `rules/`.
 - Результаты создаются автоматически в `outputs/runs/<run_id>/`.
+
+При полном web-аудите агент автоматически находит документы в `data/` и `knowledge/`, индексирует изменённый набор в Qdrant и добавляет релевантные фрагменты к evidence каждой группы выводов.
 
 ## Установка
 
@@ -129,9 +131,17 @@ qdrant:
 ouroboros:
   url: http://127.0.0.1:8765
   workspace: /path/to/ouroboros
+  python_executable: .venv/bin/python
 ```
 
 `/path/to/...` нужно заменить на пути в своём окружении.
+Если используется Conda, в `python_executable` нужно указать пут, который выводит `which python` в активированном окружении Audit Agent.
+
+Проверка зависимостей:
+
+```bash
+python -c "import duckdb, gradio, qdrant_client, sentence_transformers, docx, pypdf; print('dependencies: OK')"
+```
 
 Dashboard Qdrant: <http://127.0.0.1:6333/dashboard>. В конфиге указывается базовый API URL без `/dashboard`.
 
@@ -141,6 +151,10 @@ Ouroboros запускается отдельно:
 
 ```bash
 CORE="/path/to/ouroboros-core"
+TEST_WORKSPACE="/path/to/ouroboros-test-workspace"
+
+mkdir -p "$TEST_WORKSPACE"
+echo "Тестовая папка Ouroboros" > "$TEST_WORKSPACE/README.txt"
 
 cd "$CORE"
 source .venv/bin/activate

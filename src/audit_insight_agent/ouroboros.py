@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+import uuid
 from collections import Counter
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -131,7 +132,8 @@ class OuroborosOrchestrator:
     ) -> Iterator[dict[str, Any]]:
         yield {"kind": "status", "message": "Проверка соединения с Ouroboros…"}
         self.client.health()
-        prompt = self._task_prompt(user_request, case_name)
+        request_path = self._write_task_request(user_request, case_name)
+        prompt = self._task_prompt(request_path)
         created = self.client.create_task(
             prompt,
             str(Path(self.settings.ouroboros.workspace).expanduser().resolve()),
@@ -160,8 +162,10 @@ class OuroborosOrchestrator:
                 if status != "completed":
                     detail = task.get("error") or task.get("result") or "без описания"
                     raise RuntimeError(f"Задача Ouroboros завершилась как {status}: {detail}")
-                run_id = self._extract_run_id(task.get("result"))
+                task_result = task.get("result")
+                run_id = self._extract_run_id(task_result)
                 result = self.result_loader(run_id)
+                result["ouroboros_answer"] = self._extract_auditor_answer(task_result)
                 run_dir = Path(result["candidate_findings_path"]).parent
                 result["evaluation"] = run_external_evaluator(
                     case_name=case_name,
@@ -178,19 +182,52 @@ class OuroborosOrchestrator:
             f"{self.settings.ouroboros.timeout_seconds} секунд"
         )
 
+    def _write_task_request(self, user_request: str, case_name: str) -> Path:
+        request_root = PROJECT_ROOT / "outputs" / "requests"
+        request_root.mkdir(parents=True, exist_ok=True)
+        path = request_root / f"REQ-{uuid.uuid4().hex}.json"
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(
+                {"case_name": case_name, "auditor_query": user_request},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+        return path
+
+    def _task_prompt(self, request_path: Path) -> str:
+        workspace = Path(self.settings.ouroboros.workspace).expanduser().resolve()
+        python_path = Path(self.settings.ouroboros.python_executable).expanduser()
+        if not python_path.is_absolute():
+            python_path = workspace / python_path
+        relative_request = request_path.resolve().relative_to(PROJECT_ROOT)
+        command = [
+            str(python_path.resolve()),
+            "scripts/ouroboros_audit.py",
+            "--request",
+            str(relative_request),
+        ]
+        return f"""Ты выступаешь как аудитор и оркестратор Audit Insight Agent.
+Это боевой запуск: не изменяй код, правила, конфигурацию и evaluator.
+Выполни команду в workspace точно с таким argv:
+{json.dumps(command, ensure_ascii=False)}
+Команда запустит табличные правила, RAG по документам и создаст evidence, candidate_findings.json и report.md.
+После запуска прочитай только созданные report.md и candidate_findings.json.
+Дай краткий аудиторский вывод, основанный только на этих артефактах.
+Последняя строка ответа обязана иметь вид AUDIT_RUN_ID=<run_id>.
+Не придумывай факты, run_id и не читай закрытый ground truth."""
+
     @staticmethod
-    def _task_prompt(user_request: str, case_name: str) -> str:
-        query_json = json.dumps(user_request, ensure_ascii=False)
-        case_json = json.dumps(case_name, ensure_ascii=False)
-        return f"""Ты оркестрируешь готовый Audit Insight Agent в текущем workspace.
-Это обычный запуск аудита: не изменяй код, конфигурации, правила и evaluator.
-Запусти публичную функцию audit_insight_agent.ouroboros_tools.run_full_audit(
-    case_name={case_json}, auditor_query={query_json}
-).
-Используй Python из .venv текущего workspace, если он существует.
-Убедись, что candidate_findings.json и report.md созданы.
-В финальном ответе обязательно напиши отдельной строкой только AUDIT_RUN_ID=<run_id>.
-Не придумывай run_id и не пересказывай содержимое закрытого evaluator."""
+    def _extract_auditor_answer(task_result: Any) -> str:
+        text = (
+            json.dumps(task_result, ensure_ascii=False)
+            if isinstance(task_result, dict)
+            else str(task_result or "")
+        )
+        return re.sub(r"(?m)^AUDIT_RUN_ID=.*$", "", text).strip()
 
     @classmethod
     def _extract_run_id(cls, task_result: Any) -> str:
@@ -222,6 +259,9 @@ class OuroborosOrchestrator:
             "report": run_dir / "report.md",
             "run_manifest": run_dir / "run_manifest.json",
         }
+        rag_context = run_dir / "rag_context.json"
+        if rag_context.is_file():
+            paths["rag_context"] = rag_context
         return _run_payload(result, paths)
 
     @staticmethod
@@ -233,10 +273,13 @@ class OuroborosOrchestrator:
             for severity, count in sorted(severity_counts.items())
         ) or "нет"
         titles = [item.get("title", "Без названия") for item in findings[:5]]
-        lines = [
+        lines = []
+        if result.get("ouroboros_answer"):
+            lines.extend([str(result["ouroboros_answer"]), "---"])
+        lines.extend([
             f"Анализ завершён со статусом {result['status']}.",
             f"Сформировано выводов: {len(findings)}; по критичности: {severity_text}.",
-        ]
+        ])
         if titles:
             lines.append("Основные выводы: " + "; ".join(titles) + ".")
         errors = result.get("execution_errors", [])

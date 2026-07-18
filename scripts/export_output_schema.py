@@ -6,12 +6,7 @@ from audit_insight_agent.models import (
     AgentRunResult,
 )
 
-"""Экспорт JSON Schema выходного контракта агента.
-
-TODO: после реализации AgentResponse экспортировать его JSON Schema в
-стабильный машиночитаемый файл. Скрипт должен импортировать публичную
-модель из audit_insight_agent, а не дублировать её поля.
-"""
+"""Экспорт JSON Schema текущего выходного контракта AgentRunResult."""
 
 
 def main() -> None:

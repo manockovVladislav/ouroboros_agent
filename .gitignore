@@ -54,6 +54,7 @@ knowledge/documents/**
 !knowledge/documents/.gitkeep
 
 # Local indexes and databases
+.audit_insight/
 *.db
 *.sqlite
 *.sqlite3

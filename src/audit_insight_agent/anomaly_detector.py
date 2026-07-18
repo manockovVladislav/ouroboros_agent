@@ -35,7 +35,3 @@ def compile_anomaly(rule: AuditRule, table_names: dict[str, str]) -> str:
         f"{float(spec.threshold)} * (s.q3 - s.q1) OR d.{field} > s.q3 + "
         f"{float(spec.threshold)} * (s.q3 - s.q1)"
     )
-
-
-def detect_anomalies(*_args, **_kwargs):
-    return []

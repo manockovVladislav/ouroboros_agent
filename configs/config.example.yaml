@@ -19,6 +19,7 @@ qdrant:
 ouroboros:
   url: http://127.0.0.1:8765
   workspace: /path/to/ouroboros
+  python_executable: .venv/bin/python
   password_env: OUROBOROS_NETWORK_PASSWORD
   poll_interval_seconds: 1
   timeout_seconds: 900
