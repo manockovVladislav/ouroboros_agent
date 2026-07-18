@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,12 @@ def test_physical_currency_case_runs_without_case_logic_in_core(tmp_path):
     assert result.findings
     assert paths["candidate_findings"].exists()
     assert paths["report"].exists()
+    events_path = tmp_path / "RUN-INTEGRATION" / "events.jsonl"
+    events = [json.loads(line) for line in events_path.read_text("utf-8").splitlines()]
+    event_names = {event["event"] for event in events}
+    assert {"audit_started", "rules_selected", "rule_completed"} <= event_names
+    manifest = json.loads(paths["run_manifest"].read_text("utf-8"))
+    assert manifest["files"]["events"] == "events.jsonl"
 
     reference = result.findings[0].evidence[0]
     stored = EvidenceStore(tmp_path / "RUN-INTEGRATION" / "evidence").get(

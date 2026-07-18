@@ -17,6 +17,7 @@ from .finding_builder import deduplicate_findings
 from .models import AgentRunResult, CandidateFinding
 from .report_generator import render_markdown_report
 from .retriever import BgeM3Embedder, QdrantRetriever, create_qdrant_client
+from .run_logging import RunEventLogger
 
 
 """Ограниченный публичный шлюз между Ouroboros и аудиторским ядром."""
@@ -370,14 +371,20 @@ def run_full_audit(
         os.getenv("AUDIT_INSIGHT_CONFIG", str(PROJECT_ROOT / "configs/config.yaml"))
     ).expanduser().resolve()
     settings = load_application_settings(settings_file)
-    result, paths = ground_audit_with_documents(
-        result=result,
-        paths=paths,
-        package=package,
-        settings=settings,
-        project_root=PROJECT_ROOT,
-        auditor_query=auditor_query,
-    )
+    try:
+        result, paths = ground_audit_with_documents(
+            result=result,
+            paths=paths,
+            package=package,
+            settings=settings,
+            project_root=PROJECT_ROOT,
+            auditor_query=auditor_query,
+        )
+    except Exception as error:
+        RunEventLogger(
+            Path(paths["candidate_findings"]).parent, result.run_id
+        ).exception("audit_failed", error, phase="rag")
+        raise
     return _run_payload(result, paths)
 
 

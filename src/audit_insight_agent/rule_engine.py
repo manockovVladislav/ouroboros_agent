@@ -19,6 +19,7 @@ from .models import (
     RuleStatus,
 )
 from .reconciliation import compile_reconciliation
+from .run_logging import RunEventLogger
 
 
 def _quote_literal(value: str) -> str:
@@ -171,8 +172,25 @@ def execute_rules(
 ) -> tuple[list[CandidateFinding], list[RuleResult]]:
     findings = []
     results = []
+    event_log = RunEventLogger(context.evidence_store.root.parent, context.run_id)
     for rule in rules:
+        event_log.event(
+            "rule_started",
+            rule_id=rule.rule_id,
+            rule_kind=rule.kind.value,
+            source_ids=rule.source_ids,
+        )
         rule_findings, result = execute_rule(context, rule)
         findings.extend(rule_findings)
         results.append(result)
+        event_log.event(
+            "rule_completed",
+            level="ERROR" if result.status == RuleStatus.ERROR else "INFO",
+            rule_id=result.rule_id,
+            status=result.status.value,
+            evaluated_rows=result.evaluated_rows,
+            findings_count=result.findings_count,
+            truncated=result.truncated,
+            error=result.error,
+        )
     return findings, results

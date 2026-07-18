@@ -67,3 +67,7 @@ Web и developer mode используют разные модули. Developer 
 обычный web callback и не имеют операций merge или доступа к evaluator.
 Web не запускает Ouroboros и Qdrant как дочерние процессы: их URL задаются в
 `configs/config.yaml`.
+
+Все ключевые этапы записываются в `outputs/runs/<run_id>/events.jsonl`. Общий
+ротируемый журнал находится в `logs/audit-insight.log`, а запрос и ответ
+web-чата — в `outputs/runs/<run_id>/chat.json`.

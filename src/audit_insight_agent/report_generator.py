@@ -255,6 +255,14 @@ def write_run_outputs(
         },
     }
 
+    for name, filename in (
+        ("events", "events.jsonl"),
+        ("rag_context", "rag_context.json"),
+        ("chat", "chat.json"),
+    ):
+        if (output_path / filename).is_file():
+            manifest["files"][name] = filename
+
     _write_text_atomic(
         manifest_path,
         json.dumps(
@@ -269,3 +277,24 @@ def write_run_outputs(
         "report": report_path,
         "run_manifest": manifest_path,
     }
+
+
+def refresh_run_manifest_files(run_dir: str | Path) -> Path:
+    """Refresh optional history artifacts after web/Ouroboros completion."""
+
+    root = Path(run_dir).expanduser().resolve()
+    manifest_path = root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files = manifest.setdefault("files", {})
+    for name, filename in (
+        ("events", "events.jsonl"),
+        ("rag_context", "rag_context.json"),
+        ("chat", "chat.json"),
+    ):
+        if (root / filename).is_file():
+            files[name] = filename
+    _write_text_atomic(
+        manifest_path,
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+    )
+    return manifest_path

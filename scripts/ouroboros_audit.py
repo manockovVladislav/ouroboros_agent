@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from audit_insight_agent.ouroboros_tools import run_full_audit
+from audit_insight_agent.logging_config import configure_logging
 
 
 def _load_request(path_value: str) -> dict[str, str]:
@@ -34,11 +36,18 @@ def _load_request(path_value: str) -> dict[str, str]:
 
 
 def main() -> None:
+    configure_logging(PROJECT_ROOT / "configs" / "logging.yaml")
     parser = argparse.ArgumentParser()
     parser.add_argument("--request", required=True)
     arguments = parser.parse_args()
     request = _load_request(arguments.request)
-    result = run_full_audit(request["case_name"], request["auditor_query"])
+    try:
+        result = run_full_audit(request["case_name"], request["auditor_query"])
+    except Exception:
+        logging.getLogger("audit_insight.ouroboros_entrypoint").exception(
+            "Audit execution failed case=%s", request["case_name"]
+        )
+        raise
     print("AUDIT_RESULT=" + json.dumps(result, ensure_ascii=False))
     print(f"AUDIT_RUN_ID={result['run_id']}")
 

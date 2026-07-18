@@ -10,6 +10,7 @@ from .agent import AuditInsightAgent
 from .config import load_application_settings, load_source_catalog
 from .data_loader import DuckDBTableStore
 from .ingestion import ingest_catalog
+from .logging_config import configure_logging
 from .models import ApplicationSettings
 from .retriever import BgeM3Embedder, QdrantRetriever, create_qdrant_client
 
@@ -186,6 +187,11 @@ def _run_audit_case(arguments: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    logging_path = Path(
+        os.getenv("AUDIT_LOG_CONFIG", str(project_root / "configs/logging.yaml"))
+    )
+    configure_logging(logging_path)
     arguments = build_parser().parse_args()
     if arguments.command == "ingest":
         _run_ingest(arguments)

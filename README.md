@@ -73,7 +73,7 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 │  ├─ ouroboros.py             # HTTP-клиент Ouroboros
 │  ├─ web.py, cli.py           # Gradio и CLI
 │  ├─ evaluator_adapter.py, developer_tools.py
-│  └─ logging_config.py
+│  └─ logging_config.py, run_logging.py
 ├─ templates/
 │  ├─ finding.md.j2
 │  └─ report.md.j2
@@ -92,6 +92,7 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 │  ├─ findings/
 │  ├─ reports/
 │  └─ runs/                    # артефакты по run_id
+├─ logs/                            # ротируемый audit-insight.log
 ├─ .env.example
 ├─ .gitignore
 ├─ pyproject.toml
@@ -181,6 +182,37 @@ python scripts/run_web.py
 ```
 
 Открыть <http://127.0.0.1:7860>. Интерфейс показывает статус задачи Ouroboros, ответ агента, findings, `run_id` и файл отчёта.
+
+## Логи и история
+
+Общий журнал web, CLI, Ouroboros-шлюза и аудиторского ядра:
+
+```text
+logs/audit-insight.log
+```
+
+Файл ротируется при размере 10 МБ; хранится до 10 архивов. Путь можно переопределить через `AUDIT_LOG_DIR`.
+
+Каждый аудит сохраняет отдельную машиночитаемую историю:
+
+```text
+outputs/runs/<run_id>/
+├─ events.jsonl              # этапы, статусы, ошибки и метрики
+├─ chat.json                 # запрос аудитора, ответ и Ouroboros task_id
+├─ candidate_findings.json
+├─ rag_context.json
+├─ report.md
+├─ run_manifest.json
+└─ evidence/
+```
+
+Наблюдение за общим логом:
+
+```bash
+tail -f logs/audit-insight.log
+```
+
+События run пишутся в append-only JSONL. Поля с именами `password`, `secret`, `token`, `api_key` и `authorization` маскируются.
 
 ## CLI и индексация
 

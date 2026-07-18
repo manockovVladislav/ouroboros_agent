@@ -27,6 +27,7 @@ from .models import (
 from .report_generator import (
     write_run_outputs,
 )
+from .run_logging import RunEventLogger
 from .rule_engine import (
     execute_rules,
 )
@@ -129,7 +130,20 @@ class AuditInsightAgent:
 
         started_at = datetime.now(timezone.utc)
         actual_run_id = run_id or create_run_id()
+        run_output_dir = Path(output_root).expanduser().resolve() / actual_run_id
+        event_log = RunEventLogger(run_output_dir, actual_run_id)
+        event_log.event(
+            "audit_started",
+            case_dir=str(Path(case_dir).expanduser().resolve()),
+            auditor_query_length=len(auditor_query),
+        )
         package = load_case_package(case_dir, shared_rules_dir=shared_rules_dir)
+        event_log.event(
+            "case_loaded",
+            case_name=package.name,
+            configured_sources=len(package.sources.sources),
+            configured_rules=len(package.rules),
+        )
         if selected_rule_ids is None:
             selected_rules = select_relevant_rules(auditor_query, package.rules)
         else:
@@ -140,6 +154,11 @@ class AuditInsightAgent:
             selected_rules = tuple(
                 available[rule_id] for rule_id in sorted(selected_rule_ids)
             )
+        event_log.event(
+            "rules_selected",
+            rule_ids=[rule.rule_id for rule in selected_rules],
+            count=len(selected_rules),
+        )
         selected_source_ids = {
             source_id for rule in selected_rules for source_id in rule.source_ids
         }
@@ -159,7 +178,6 @@ class AuditInsightAgent:
             for source in package.sources.sources
             if source.enabled and source.source_id in selected_source_ids
         ]
-        run_output_dir = Path(output_root).expanduser().resolve() / actual_run_id
         evidence_store = EvidenceStore(run_output_dir / "evidence")
         source_descriptors = []
 
@@ -170,10 +188,17 @@ class AuditInsightAgent:
                     raise ValueError(
                         f"Executable rule source must be a table: {source.source_id}"
                     )
-                table_names[source.source_id] = table_store.ingest(
-                    source,
-                    source_config_path,
-                )
+                event_log.event("source_loading", source_id=source.source_id)
+                try:
+                    table_names[source.source_id] = table_store.ingest(
+                        source,
+                        source_config_path,
+                    )
+                except Exception as error:
+                    event_log.exception(
+                        "source_loading_failed", error, source_id=source.source_id
+                    )
+                    raise
                 path = resolve_source_location(source, source_config_path)
                 source_descriptors.append(
                     DataSource(
@@ -182,6 +207,12 @@ class AuditInsightAgent:
                         file_format=infer_table_format(path, source.format),
                         size_bytes=path.stat().st_size,
                     )
+                )
+                event_log.event(
+                    "source_loaded",
+                    source_id=source.source_id,
+                    file_format=infer_table_format(path, source.format),
+                    size_bytes=path.stat().st_size,
                 )
 
             runtime = AuditRuntimeContext(
@@ -195,6 +226,18 @@ class AuditInsightAgent:
                 },
             )
             findings, rule_results = execute_rules(runtime, selected_rules)
+        event_log.event(
+            "rules_completed",
+            results=[
+                {
+                    "rule_id": item.rule_id,
+                    "status": item.status.value,
+                    "findings_count": item.findings_count,
+                    "error": item.error,
+                }
+                for item in rule_results
+            ],
+        )
 
         findings = deduplicate_findings(findings)
         errors = [
@@ -225,4 +268,11 @@ class AuditInsightAgent:
             },
         )
         paths = write_run_outputs(result, run_output_dir)
+        event_log.event(
+            "audit_outputs_written",
+            status=result.status.value,
+            findings_count=len(result.findings),
+            execution_errors_count=len(result.execution_errors),
+            files={name: str(path) for name, path in paths.items()},
+        )
         return result, paths

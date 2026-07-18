@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -16,6 +17,8 @@ from urllib.request import Request, urlopen
 from .config import load_application_settings
 from .evaluator_adapter import run_external_evaluator
 from .models import AgentRunResult, ApplicationSettings
+from .report_generator import refresh_run_manifest_files
+from .run_logging import RunEventLogger, append_jsonl, utc_now, write_chat_history
 from .ouroboros_tools import (
     PROJECT_ROOT,
     _output_root,
@@ -101,6 +104,7 @@ class OuroborosOrchestrator:
 
     TERMINAL_STATUSES = {"completed", "failed", "cancelled", "error"}
     RUN_ID_PATTERN = re.compile(r"\bRUN-[A-Za-z0-9_.-]{1,76}\b")
+    logger = logging.getLogger("audit_insight.ouroboros")
 
     def __init__(
         self,
@@ -131,8 +135,20 @@ class OuroborosOrchestrator:
         self, user_request: str, case_name: str
     ) -> Iterator[dict[str, Any]]:
         yield {"kind": "status", "message": "Проверка соединения с Ouroboros…"}
+        self.logger.info("Checking Ouroboros health at %s", self.settings.ouroboros.url)
         self.client.health()
         request_path = self._write_task_request(user_request, case_name)
+        request_events = request_path.with_suffix(".events.jsonl")
+        append_jsonl(
+            request_events,
+            {
+                "timestamp": utc_now(),
+                "event": "web_request_received",
+                "request_id": request_path.stem,
+                "case_name": case_name,
+                "auditor_query_length": len(user_request),
+            },
+        )
         prompt = self._task_prompt(request_path)
         created = self.client.create_task(
             prompt,
@@ -142,6 +158,20 @@ class OuroborosOrchestrator:
         task_id = str(created.get("task_id") or "")
         if not task_id:
             raise OuroborosConnectionError("Ouroboros не вернул task_id")
+        append_jsonl(
+            request_events,
+            {
+                "timestamp": utc_now(),
+                "event": "ouroboros_task_created",
+                "request_id": request_path.stem,
+                "task_id": task_id,
+            },
+        )
+        self.logger.info(
+            "Ouroboros task created task_id=%s request_id=%s",
+            task_id,
+            request_path.stem,
+        )
 
         yield {
             "kind": "status",
@@ -153,6 +183,16 @@ class OuroborosOrchestrator:
             task = self.client.get_task(task_id)
             status = str(task.get("status") or "unknown").lower()
             if status != previous_status:
+                append_jsonl(
+                    request_events,
+                    {
+                        "timestamp": utc_now(),
+                        "event": "ouroboros_task_status",
+                        "request_id": request_path.stem,
+                        "task_id": task_id,
+                        "status": status,
+                    },
+                )
                 yield {
                     "kind": "status",
                     "message": f"Ouroboros: **{status}** (`{task_id}`)",
@@ -161,6 +201,12 @@ class OuroborosOrchestrator:
             if status in self.TERMINAL_STATUSES:
                 if status != "completed":
                     detail = task.get("error") or task.get("result") or "без описания"
+                    self.logger.error(
+                        "Ouroboros task failed task_id=%s status=%s detail=%s",
+                        task_id,
+                        status,
+                        detail,
+                    )
                     raise RuntimeError(f"Задача Ouroboros завершилась как {status}: {detail}")
                 task_result = task.get("result")
                 run_id = self._extract_run_id(task_result)
@@ -174,6 +220,24 @@ class OuroborosOrchestrator:
                     run_dir=run_dir,
                 )
                 result["answer"] = self._answer(result)
+                chat_path = write_chat_history(
+                    run_dir,
+                    run_id=run_id,
+                    case_name=case_name,
+                    task_id=task_id,
+                    user_request=user_request,
+                    ouroboros_answer=result["answer"],
+                )
+                event_log = RunEventLogger(run_dir, run_id)
+                event_log.event(
+                    "ouroboros_task_completed",
+                    task_id=task_id,
+                    request_id=request_path.stem,
+                    chat_path=str(chat_path),
+                )
+                if (run_dir / "run_manifest.json").is_file():
+                    refresh_run_manifest_files(run_dir)
+                result["chat_path"] = str(chat_path)
                 yield {"kind": "result", "result": result}
                 return
             time.sleep(self.settings.ouroboros.poll_interval_seconds)
@@ -189,7 +253,12 @@ class OuroborosOrchestrator:
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(
             json.dumps(
-                {"case_name": case_name, "auditor_query": user_request},
+                {
+                    "request_id": path.stem,
+                    "created_at": utc_now(),
+                    "case_name": case_name,
+                    "auditor_query": user_request,
+                },
                 ensure_ascii=False,
                 indent=2,
             ),

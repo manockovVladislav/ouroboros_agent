@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import inspect
+import logging
 
 from .ouroboros import OuroborosOrchestrator
 from .ouroboros_tools import DEFAULT_CASES_ROOT
+
+
+logger = logging.getLogger("audit_insight.web")
 
 
 def available_cases() -> list[str]:
@@ -33,6 +37,11 @@ def build_interface():
             yield history, "Введите задачу аудитора.", {}, None, ""
             return
         history.append({"role": "user", "content": message})
+        logger.info(
+            "Web audit requested case=%s query_length=%s",
+            case_name,
+            len(message),
+        )
         yield history, "Передача задачи в Ouroboros…", {}, None, ""
         try:
             for event in orchestrator.run_with_updates(message, case_name):
@@ -55,6 +64,7 @@ def build_interface():
                     result["run_id"],
                 )
         except Exception as error:
+            logger.exception("Web audit failed case=%s", case_name)
             history.append(
                 {
                     "role": "assistant",
