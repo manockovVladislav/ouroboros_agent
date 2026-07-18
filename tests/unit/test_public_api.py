@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -306,6 +307,99 @@ def test_ouroboros_protocol_supports_one_blocking_clarification():
         "Done\nAUDIT_IMPROVEMENT_NEEDED=false\nAUDIT_RUN_ID=RUN-1"
     )
     assert answer == "Done"
+
+
+def test_local_scope_never_requires_clarification(tmp_path):
+    settings = ApplicationSettings(
+        self_improvement={"allow_blocking_clarification": True},
+        databases={
+            "connections": {
+                "replica_a": {
+                    "host": "db.local",
+                    "database": "audit",
+                    "user": "readonly",
+                    "password_env": "DB_PASSWORD",
+                }
+            }
+        },
+        ouroboros=OuroborosSettings(workspace=str(tmp_path)),
+    )
+    orchestrator = OuroborosOrchestrator(settings=settings, client=object())
+
+    assert not orchestrator._clarification_allowed(
+        "Проведи полный аудит data/ и knowledge/", None
+    )
+    assert not orchestrator._clarification_allowed(
+        "Анализируй только локальные файлы", None
+    )
+    assert orchestrator._clarification_allowed("Проверь операции", None)
+
+    request_path = orchestrator._write_task_request(
+        "Проведи полный аудит data/ и knowledge/"
+    )
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert payload["input_mode"] == "local_files"
+    assert payload["scope_complete"] is True
+    assert payload["database_access"] is False
+    assert "replica_name" not in payload
+    prompt = orchestrator._task_prompt(request_path)
+    assert "database_access: false" in prompt
+    assert "это корректный локальный режим" in prompt
+
+
+def test_disallowed_clarification_is_retried_without_user_dialog(tmp_path):
+    class FakeClient:
+        def __init__(self):
+            self.created = 0
+
+        def health(self):
+            return {"ok": True}
+
+        def create_task(self, description, workspace, timeout_seconds):
+            self.created += 1
+            if self.created == 2:
+                assert "Вопросы пользователю запрещены" in description
+            return {"task_id": f"task-{self.created}"}
+
+        def get_task(self, task_id):
+            if task_id == "task-1":
+                return {
+                    "status": "completed",
+                    "result": (
+                        'AUDIT_CLARIFICATION_REQUIRED={"question":"Какую '
+                        'систему проверять?"}'
+                    ),
+                }
+            return {"status": "completed", "result": "AUDIT_RUN_ID=RUN-RETRY"}
+
+    loaded = {
+        "run_id": "RUN-RETRY",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(tmp_path / "candidate_findings.json"),
+        "report_path": str(tmp_path / "report.md"),
+    }
+    client = FakeClient()
+    settings = ApplicationSettings(
+        self_improvement={"allow_blocking_clarification": True},
+        ouroboros=OuroborosSettings(
+            workspace=str(tmp_path), timeout_seconds=60, poll_interval_seconds=0.1
+        ),
+    )
+    events = list(
+        OuroborosOrchestrator(
+            settings=settings,
+            client=client,
+            result_loader=lambda _run_id: dict(loaded),
+        ).run_with_updates("Проведи полный аудит data/ и knowledge/")
+    )
+
+    assert client.created == 2
+    assert all(event["kind"] != "clarification" for event in events)
+    assert events[-1]["result"]["run_id"] == "RUN-RETRY"
 
 
 def test_ouroboros_selects_only_exact_registered_replica_name(tmp_path):

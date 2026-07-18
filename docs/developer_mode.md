@@ -7,7 +7,7 @@ self_improvement:
   enabled: true
   review_after_every_audit: true
   require_detected_gap: true
-  allow_blocking_clarification: true
+  allow_blocking_clarification: false
   max_changed_files: 20
 ```
 

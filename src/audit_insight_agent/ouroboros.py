@@ -174,6 +174,10 @@ class OuroborosOrchestrator:
         self.logger.info("Checking Ouroboros health at %s", self.settings.ouroboros.url)
         self.client.health()
         request_path = self._write_task_request(user_request)
+        request_payload = json.loads(request_path.read_text(encoding="utf-8"))
+        clarification_allowed = self._clarification_allowed(
+            user_request, request_payload.get("replica_name")
+        )
         request_events = request_path.with_suffix(".events.jsonl")
         append_jsonl(
             request_events,
@@ -216,6 +220,7 @@ class OuroborosOrchestrator:
         previous_status = ""
         event_cursor = 0
         previous_progress = ""
+        clarification_retry_used = False
         while time.monotonic() < deadline:
             task = self.client.get_task(task_id)
             status = str(task.get("status") or "unknown").lower()
@@ -271,6 +276,49 @@ class OuroborosOrchestrator:
                     )
                     if not question:
                         raise RuntimeError("Ouroboros вернул пустой вопрос")
+                    if not clarification_allowed:
+                        if clarification_retry_used:
+                            raise RuntimeError(
+                                "Ouroboros повторно запросил ненужное "
+                                "уточнение вместо запуска аудита"
+                            )
+                        clarification_retry_used = True
+                        append_jsonl(
+                            request_events,
+                            {
+                                "timestamp": utc_now(),
+                                "event": "clarification_rejected",
+                                "request_id": request_path.stem,
+                                "task_id": task_id,
+                                "question": question,
+                                "reason": "audit_scope_is_already_defined",
+                            },
+                        )
+                        yield {
+                            "kind": "status",
+                            "message": (
+                                "Ouroboros запросил лишнее уточнение; "
+                                "область уже задана, повторяю запуск…"
+                            ),
+                        }
+                        retry = self.client.create_task(
+                            self._task_prompt(request_path, force_execution=True),
+                            str(
+                                Path(self.settings.ouroboros.workspace)
+                                .expanduser()
+                                .resolve()
+                            ),
+                            self.settings.ouroboros.timeout_seconds,
+                        )
+                        task_id = str(retry.get("task_id") or "")
+                        if not task_id:
+                            raise OuroborosConnectionError(
+                                "Ouroboros не вернул task_id для повторного запуска"
+                            )
+                        previous_status = ""
+                        event_cursor = 0
+                        previous_progress = ""
+                        continue
                     yield {
                         "kind": "clarification",
                         "question": question,
@@ -321,18 +369,22 @@ class OuroborosOrchestrator:
         request_root.mkdir(parents=True, exist_ok=True)
         path = request_root / f"REQ-{uuid.uuid4().hex}.json"
         replica_name = self._replica_from_query(user_request)
+        payload = {
+            "request_id": path.stem,
+            "created_at": utc_now(),
+            "auditor_query": user_request,
+            "input_mode": (
+                "local_files_and_replica" if replica_name else "local_files"
+            ),
+            "scope_complete": True,
+            "local_roots": ["data/", "knowledge/"],
+            "database_access": bool(replica_name),
+        }
+        if replica_name:
+            payload["replica_name"] = replica_name
         temporary = path.with_suffix(".json.tmp")
         temporary.write_text(
-            json.dumps(
-                {
-                    "request_id": path.stem,
-                    "created_at": utc_now(),
-                    "auditor_query": user_request,
-                    "replica_name": replica_name,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
+            json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         temporary.replace(path)
@@ -354,7 +406,29 @@ class OuroborosOrchestrator:
             )
         return matches[0] if matches else None
 
-    def _task_prompt(self, request_path: Path) -> str:
+    def _clarification_allowed(
+        self, user_request: str, replica_name: str | None
+    ) -> bool:
+        if not self.settings.self_improvement.allow_blocking_clarification:
+            return False
+        if not self.settings.databases.connections:
+            return False
+        normalized = user_request.casefold()
+        fixed_scope_markers = (
+            "data/",
+            "knowledge/",
+            "локальн",
+            "только по ним",
+            "все файл",
+            "полный аудит",
+        )
+        if any(marker in normalized for marker in fixed_scope_markers):
+            return False
+        return replica_name is None
+
+    def _task_prompt(
+        self, request_path: Path, *, force_execution: bool = False
+    ) -> str:
         workspace = Path(self.settings.ouroboros.workspace).expanduser().resolve()
         python_path = Path(self.settings.ouroboros.python_executable).expanduser()
         if not python_path.is_absolute():
@@ -367,19 +441,38 @@ class OuroborosOrchestrator:
             str(relative_request),
         ]
         request_payload = json.loads(request_path.read_text(encoding="utf-8"))
-        selected_replica = request_payload.get("replica_name") or "не указана"
-        clarification_enabled = self.settings.self_improvement.allow_blocking_clarification
+        selected_replica = request_payload.get("replica_name") or "не используется"
+        input_mode = request_payload.get("input_mode") or "local_files"
+        database_access = bool(request_payload.get("database_access"))
+        clarification_enabled = self._clarification_allowed(
+            str(request_payload.get("auditor_query") or ""),
+            request_payload.get("replica_name"),
+        ) and not force_execution
+        clarification_instruction = (
+            """Один вопрос допустим только если ни один источник не удаётся идентифицировать
+и любая трактовка сделает расчёты недостоверными. Тогда не запускай расчёты и верни:
+AUDIT_CLARIFICATION_REQUIRED={{"question":"один конкретный вопрос","reason":"почему без ответа нельзя"}}"""
+            if clarification_enabled
+            else """Вопросы пользователю запрещены: область аудита уже задана. Не возвращай
+AUDIT_CLARIFICATION_REQUIRED. Не спрашивай о реплике, source_system, выборе подпапки или системы."""
+        )
         return f"""Ты выступаешь как аудитор и главный оркестратор Audit Insight Agent.
 Это боевой запуск: не изменяй код, правила или конфигурацию.
-Снача изучи описания источников, имена файлов, схемы и документы knowledge.
-Не задавай вопросы о формате отчёта, методе или несущественных деталях: прими разумное
-допущение и продолжай. Один вопрос разрешён только до расчётов, если назначение данных нельзя установить
-и ошибочная трактовка изменит смысл аудита. Вопросы разрешены: {str(clarification_enabled).lower()}.
-Точно названная в запросе зарегистрированная реплика: {selected_replica}.
-В этом крайнем случае не запускай расчёты и верни одну последнюю строку:
-AUDIT_CLARIFICATION_REQUIRED={{"question":"один конкретный вопрос","reason":"почему без ответа нельзя"}}
+Машинный контракт области уже проверен приложением:
+- input_mode: {input_mode}
+- scope_complete: true
+- database_access: {str(database_access).lower()}
+- replica: {selected_replica}
+Этот контракт приоритетнее любых общих знаний или прежних инструкций об обязательной реплике.
+Если database_access=false, отсутствие replica_name — это корректный локальный режим, а не ошибка и не блокер.
+Область по умолчанию: все поддерживаемые локальные файлы из data/ и все документы knowledge/.
+Наличие нескольких подпапок, доменов, source_system или таблиц не является неоднозначностью: анализируй их все.
+Реплику БД используй только если в запросе точно назван её зарегистрированный alias. Выбранная реплика: {selected_replica}.
+Если указано «не использовать БД» или alias не назван, анализируй только локальные источники и не спрашивай о реплике.
+Считай, что пользователь передал минимально достаточный набор для всех возможных проверок. Отсутствующие необязательные источники укажи как ограничение в отчёте, но не останавливай запуск.
+{clarification_instruction}
 
-Выполни команду в workspace точно с таким argv:
+Не выбирай одну систему вместо других. Сразу выполни команду в workspace точно с таким argv:
 {json.dumps(command, ensure_ascii=False)}
 Команда запустит табличные правила, RAG по документам и создаст evidence, candidate_findings.json и report.md.
 После запуска прочитай только созданные report.md и candidate_findings.json.

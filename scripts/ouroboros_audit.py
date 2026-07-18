@@ -30,11 +30,18 @@ def _load_request(path_value: str) -> dict[str, str]:
         raise ValueError("Audit request must be a JSON object")
     auditor_query = str(raw.get("auditor_query") or "").strip()
     replica_name = str(raw.get("replica_name") or "").strip()
+    input_mode = str(raw.get("input_mode") or "local_files").strip()
+    database_access = bool(raw.get("database_access", False))
     if not auditor_query:
         raise ValueError("auditor_query is required")
+    if input_mode == "local_files" and (database_access or replica_name):
+        raise ValueError("local_files mode cannot request database access")
+    if database_access and not replica_name:
+        raise ValueError("database_access requires an exact replica_name")
     return {
         "auditor_query": auditor_query,
         "replica_name": replica_name,
+        "input_mode": input_mode,
     }
 
 
