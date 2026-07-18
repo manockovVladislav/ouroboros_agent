@@ -56,6 +56,11 @@ def render_markdown_report(
         "",
     ]
 
+    if result.case_name:
+        lines.insert(3, f"- Case: `{result.case_name}`")
+    if result.auditor_query:
+        lines.extend(["## Auditor request", "", result.auditor_query, ""])
+
     if result.execution_errors:
 
         lines.extend([
@@ -116,33 +121,19 @@ def render_markdown_report(
             ),
         ])
 
-        if finding.currency:
-            lines.append(
-                f"- Currency: `{finding.currency}`"
-            )
-
-        if finding.amount is not None:
-            lines.append(
-                f"- Amount: `{finding.amount:,.2f}`"
-            )
-
-        if finding.expected_portfolio_id:
-            lines.append(
-                "- Expected portfolio: "
-                f"`{finding.expected_portfolio_id}`"
-            )
-
-        if finding.actual_portfolio_id:
-            lines.append(
-                "- Actual portfolio: "
-                f"`{finding.actual_portfolio_id}`"
-            )
-
         lines.extend([
             "",
             "#### Summary",
             "",
             finding.summary,
+            "",
+            "#### Criterion",
+            "",
+            finding.criterion or "Не указан.",
+            "",
+            "#### Risk",
+            "",
+            finding.risk or "Не указан.",
             "",
             "#### Root cause",
             "",
@@ -167,6 +158,16 @@ def render_markdown_report(
                 f"{object_suffix}: "
                 f"{evidence.description}"
             )
+
+        if finding.facts:
+            lines.extend([
+                "",
+                "#### Facts",
+                "",
+                "```json",
+                json.dumps(finding.facts, ensure_ascii=False, indent=2, default=str),
+                "```",
+            ])
 
         if finding.recommendation:
 
@@ -250,6 +251,7 @@ def write_run_outputs(
                 json_path.name
             ),
             "report": report_path.name,
+            "evidence": "evidence/",
         },
     }
 
@@ -267,5 +269,3 @@ def write_run_outputs(
         "report": report_path,
         "run_manifest": manifest_path,
     }
-
-

@@ -1,1 +1,8 @@
-{# TODO: шаблон отчёта: резюме, область, методика, наблюдения, доказательства и ограничения. #}
+# Audit Insight Agent Report
+
+- Run ID: `{{ result.run_id }}`
+- Findings: `{{ result.findings|length }}`
+
+{% for finding in result.findings %}
+{% include "finding.md.j2" %}
+{% endfor %}

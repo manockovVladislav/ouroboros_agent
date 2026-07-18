@@ -173,5 +173,39 @@ audit-insight search "требования к учёту операций"
 ```bash
 audit-insight ingest --config configs/data_sources.example.yaml
 audit-insight search "поисковый запрос"
+audit-insight audit \
+  --case cases/physical_currency_ovp \
+  --query "Проверить физическую валюту, ОВП и последовательности"
 audit-insight agent --data-dir data/sample
+```
+
+## Декларативное аудиторское ядро
+
+Новый сценарий добавляется без изменения Python-кода:
+
+```text
+cases/<case_name>/
+├── data_sources.yaml
+├── relationships.yaml
+├── rules/
+└── prompts/
+```
+
+По запросу аудитора ядро выбирает релевантные правила и их источники,
+материализует таблицы в DuckDB, запускает SQL-проверки, сверки, анализ
+последовательностей и статистические тесты. Каждая строка отклонения получает
+отдельный checksum-защищённый Evidence. Результаты сохраняются как
+`candidate_findings.json`, `report.md`, `run_manifest.json` и каталог
+`evidence/`.
+
+Первый исполняемый пример находится в
+[`cases/physical_currency_ovp`](cases/physical_currency_ovp). Названия его
+полей и формулы находятся только в YAML-файлах пакета. Сам пакет не содержит
+данных: его `data_sources.yaml` ссылается на входы в `data/`. Переданный файл
+можно подменить без изменения YAML:
+
+```bash
+audit-insight audit --case cases/physical_currency_ovp \
+  --query "проверить лимиты ОВП" \
+  --source ovp_snapshots=data/new_run/ovp_snapshots.csv
 ```

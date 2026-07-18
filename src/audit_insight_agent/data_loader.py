@@ -278,6 +278,7 @@ def load_configured_table(
     options = dict(source.options)
 
     if file_format == "csv":
+        options.setdefault("low_memory", False)
         frame = pd.read_csv(path, encoding=source.encoding, nrows=limit, **options)
     elif file_format == "excel":
         frame = pd.read_excel(path, nrows=limit, **options)

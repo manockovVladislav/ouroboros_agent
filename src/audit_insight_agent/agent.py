@@ -11,16 +11,24 @@ from typing import Callable
 from .anomaly_detector import (
     detect_anomalies,
 )
+from .case_package import load_case_package, select_relevant_rules
+from .config import resolve_source_location
 from .data_loader import (
+    DuckDBTableStore,
     discover_data_sources,
+    infer_table_format,
 )
+from .evidence_store import EvidenceStore
 from .finding_builder import (
     deduplicate_findings,
 )
 from .models import (
     AgentRunResult,
     AuditContext,
+    AuditRuntimeContext,
     CandidateFinding,
+    DataSource,
+    RuleStatus,
     RunStatus,
 )
 from .reconciliation import (
@@ -30,6 +38,7 @@ from .report_generator import (
     write_run_outputs,
 )
 from .rule_engine import (
+    execute_rules,
     run_rules,
 )
 
@@ -241,3 +250,105 @@ class AuditInsightAgent:
 
         return result, paths
 
+    def run_case(
+        self,
+        case_dir: str | Path,
+        auditor_query: str,
+        output_root: str | Path,
+        run_id: str | None = None,
+        database: str | Path = ":memory:",
+        shared_rules_dir: str | Path | None = None,
+        source_overrides: dict[str, str | Path] | None = None,
+    ) -> tuple[AgentRunResult, dict[str, Path]]:
+        """Execute a self-contained case package through the generic audit core."""
+
+        started_at = datetime.now(timezone.utc)
+        actual_run_id = run_id or create_run_id()
+        package = load_case_package(case_dir, shared_rules_dir=shared_rules_dir)
+        selected_rules = select_relevant_rules(auditor_query, package.rules)
+        selected_source_ids = {
+            source_id for rule in selected_rules for source_id in rule.source_ids
+        }
+        source_config_path = package.root / "data_sources.yaml"
+        overrides = source_overrides or {}
+        unknown_overrides = set(overrides) - {
+            source.source_id for source in package.sources.sources
+        }
+        if unknown_overrides:
+            raise ValueError(f"Unknown source overrides: {sorted(unknown_overrides)}")
+        selected_sources = [
+            source.model_copy(
+                update={"location": str(Path(overrides[source.source_id]).expanduser().resolve())}
+            )
+            if source.source_id in overrides
+            else source
+            for source in package.sources.sources
+            if source.enabled and source.source_id in selected_source_ids
+        ]
+        run_output_dir = Path(output_root).expanduser().resolve() / actual_run_id
+        evidence_store = EvidenceStore(run_output_dir / "evidence")
+        source_descriptors = []
+
+        with DuckDBTableStore(database) as table_store:
+            table_names = {}
+            for source in selected_sources:
+                if source.source_type != "table":
+                    raise ValueError(
+                        f"Executable rule source must be a table: {source.source_id}"
+                    )
+                table_names[source.source_id] = table_store.ingest(
+                    source,
+                    source_config_path,
+                )
+                path = resolve_source_location(source, source_config_path)
+                source_descriptors.append(
+                    DataSource(
+                        source_id=source.source_id,
+                        relative_path=str(path),
+                        file_format=infer_table_format(path, source.format),
+                        size_bytes=path.stat().st_size,
+                    )
+                )
+
+            runtime = AuditRuntimeContext(
+                run_id=actual_run_id,
+                table_store=table_store,
+                table_names=table_names,
+                evidence_store=evidence_store,
+                relationships={
+                    item.relationship_id: item
+                    for item in package.relationships.relationships
+                },
+            )
+            findings, rule_results = execute_rules(runtime, selected_rules)
+
+        findings = deduplicate_findings(findings)
+        errors = [
+            f"{result.rule_id}: {result.error}"
+            for result in rule_results
+            if result.status == RuleStatus.ERROR
+        ]
+        completed_at = datetime.now(timezone.utc)
+        result = AgentRunResult(
+            run_id=actual_run_id,
+            status=RunStatus.COMPLETED_WITH_ERRORS if errors else RunStatus.COMPLETED,
+            started_at=started_at,
+            completed_at=completed_at,
+            agent_version=self.agent_version,
+            data_root=str(package.root),
+            data_sources=source_descriptors,
+            case_name=package.name,
+            auditor_query=auditor_query,
+            rule_results=rule_results,
+            findings=findings,
+            execution_errors=errors,
+            metrics={
+                "selected_sources_count": len(selected_sources),
+                "selected_rules_count": len(selected_rules),
+                "findings_count": len(findings),
+                "evidence_count": sum(len(item.evidence_ids) for item in rule_results),
+                "duration_seconds": (completed_at - started_at).total_seconds(),
+            },
+        )
+        paths = write_run_outputs(result, run_output_dir)
+        return result, paths

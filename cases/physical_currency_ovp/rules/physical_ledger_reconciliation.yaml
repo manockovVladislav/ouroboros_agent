@@ -1,0 +1,22 @@
+rule_id: PHYSICAL_OVP_RECONCILIATION
+version: "1.0"
+kind: reconciliation
+description: Сверка физической валюты с физической составляющей расчёта ОВП
+source_ids: [physical_cash_balances, ovp_snapshots]
+tags: [физическая, валюта, сверка, овп]
+reconciliation:
+  relationship_id: cash_balance_to_ovp_snapshot
+  left_value: physical_balance
+  right_value: physical_cash_position
+  aggregation: sum
+  tolerance: 0.01
+finding:
+  title: Физический остаток не согласован с расчётом ОВП
+  summary: Разница физического остатка и составляющей ОВП равна {difference}.
+  issue_type: reconciliation_difference
+  root_cause: Данные кассовой системы и расчёта ОВП сформированы несогласованно.
+  criterion: Связанные показатели источников должны совпадать в пределах допуска.
+  risk: Искажение расчёта валютной позиции и регуляторной отчётности.
+  recommendation: Проверить составляющие разницы и временную согласованность снимков.
+  severity: HIGH
+  confidence: 1.0

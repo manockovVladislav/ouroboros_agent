@@ -1,0 +1,23 @@
+rule_id: CASH_AMOUNT_ANOMALY
+version: "1.0"
+kind: anomaly
+description: Поиск статистически необычных сумм операций с физической валютой
+source_ids: [physical_cash_operations]
+tags: [физическая, валюта, аномалия]
+anomaly:
+  source_id: physical_cash_operations
+  field: amount
+  group_by: [currency, operation_type]
+  method: zscore
+  threshold: 4.0
+finding:
+  title: Выявлена необычная сумма кассовой операции
+  summary: Стандартизированное отклонение суммы равно {anomaly_score}.
+  issue_type: statistical_anomaly
+  root_cause: Причина не подтверждена; требуется дополнительная проверка.
+  criterion: Статистический сигнал не является подтверждённым нарушением.
+  risk: Необычная операция может указывать на ошибку или обход контроля.
+  recommendation: Проверить первичные документы и экономический смысл операции.
+  severity: LOW
+  confidence: 0.6
+  tags: [review_required]

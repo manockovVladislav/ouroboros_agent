@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent import AuditInsightAgent
+from .evidence_store import EvidenceStore
 
 
 """Ограниченный публичный шлюз между Ouroboros и аудиторским ядром.
@@ -40,6 +41,8 @@ DEFAULT_OUTPUT_ROOT = (
     / "outputs"
     / "runs"
 )
+
+DEFAULT_CASES_ROOT = PROJECT_ROOT / "cases"
 
 
 def _allowed_data_root() -> Path:
@@ -160,6 +163,48 @@ def run_audit(
     }
 
 
+def run_case_audit(
+    case_name: str,
+    auditor_query: str,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    """Run an allowlisted declarative case package for an auditor request."""
+
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", case_name):
+        raise ValueError("Некорректное имя case-пакета")
+    if not auditor_query.strip() or len(auditor_query) > 4000:
+        raise ValueError("Запрос аудитора должен содержать от 1 до 4000 символов")
+    case_dir = _resolve_inside(DEFAULT_CASES_ROOT / case_name, DEFAULT_CASES_ROOT)
+    result, paths = AuditInsightAgent(agent_version="0.2.0").run_case(
+        case_dir=case_dir,
+        auditor_query=auditor_query,
+        output_root=_output_root(),
+        run_id=_validate_run_id(run_id),
+    )
+    return {
+        "run_id": result.run_id,
+        "status": result.status.value,
+        "case_name": result.case_name,
+        "findings_count": len(result.findings),
+        "execution_errors_count": len(result.execution_errors),
+        "candidate_findings_path": str(paths["candidate_findings"]),
+        "report_path": str(paths["report"]),
+    }
+
+
+def get_evidence(run_id: str, evidence_id: str) -> dict[str, Any]:
+    """Return a checksum-verified evidence record through the public gateway."""
+
+    validated_run_id = _validate_run_id(run_id)
+    if validated_run_id is None:
+        raise ValueError("run_id обязателен")
+    evidence_root = _resolve_inside(
+        _output_root() / validated_run_id / "evidence",
+        _output_root(),
+    )
+    return EvidenceStore(evidence_root).get(evidence_id).model_dump(mode="json")
+
+
 def get_run_summary(
     run_id: str,
 ) -> dict[str, Any]:
@@ -201,4 +246,3 @@ def get_run_summary(
             encoding="utf-8",
         )
     )
-

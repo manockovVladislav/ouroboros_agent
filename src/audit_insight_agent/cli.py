@@ -40,6 +40,22 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--limit", type=int, default=5)
     _rag_arguments(search)
 
+    audit = commands.add_parser("audit", help="Run a declarative audit case package")
+    audit.add_argument("--case", required=True)
+    audit.add_argument("--query", required=True)
+    audit.add_argument("--output-root", default="outputs/runs")
+    audit.add_argument("--database", default=":memory:")
+    audit.add_argument("--shared-rules")
+    audit.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        metavar="SOURCE_ID=PATH",
+        help="Override a configured input with a file placed under data/",
+    )
+    audit.add_argument("--run-id")
+    audit.add_argument("--agent-version", default="0.2.0")
+
     agent = commands.add_parser("agent", help="Run the existing audit check pipeline")
     agent.add_argument("--data-dir", required=True)
     agent.add_argument("--output-root", default="outputs/runs")
@@ -136,12 +152,47 @@ def _run_agent(arguments: argparse.Namespace) -> None:
     )
 
 
+def _run_audit_case(arguments: argparse.Namespace) -> None:
+    source_overrides = {}
+    for value in arguments.source:
+        source_id, separator, path = value.partition("=")
+        if not separator or not source_id or not path:
+            raise ValueError("--source must use SOURCE_ID=PATH format")
+        source_overrides[source_id] = path
+    result, paths = AuditInsightAgent(arguments.agent_version).run_case(
+        case_dir=arguments.case,
+        auditor_query=arguments.query,
+        output_root=arguments.output_root,
+        run_id=arguments.run_id,
+        database=arguments.database,
+        shared_rules_dir=arguments.shared_rules,
+        source_overrides=source_overrides,
+    )
+    print(
+        json.dumps(
+            {
+                "run_id": result.run_id,
+                "status": result.status.value,
+                "case": result.case_name,
+                "findings_count": len(result.findings),
+                "candidate_findings": str(paths["candidate_findings"]),
+                "report": str(paths["report"]),
+                "run_manifest": str(paths["run_manifest"]),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def main() -> None:
     arguments = build_parser().parse_args()
     if arguments.command == "ingest":
         _run_ingest(arguments)
     elif arguments.command == "search":
         _run_search(arguments)
+    elif arguments.command == "audit":
+        _run_audit_case(arguments)
     else:
         _run_agent(arguments)
 

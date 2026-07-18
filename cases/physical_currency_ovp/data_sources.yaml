@@ -1,0 +1,42 @@
+version: 1
+sources:
+  - source_id: accounting_entries
+    source_type: table
+    location: ../../data/ovp/replics/accounting_entries.csv
+    primary_key: [entry_id]
+  - source_id: hedge_operations
+    source_type: table
+    location: ../../data/ovp/replics/hedge_operations.csv
+    primary_key: [hedge_id]
+  - source_id: murex_deals_replica
+    source_type: table
+    location: ../../data/ovp/replics/murex_deals_replica.csv
+    primary_key: [murex_trade_id]
+  - source_id: ovp_limits
+    source_type: table
+    location: ../../data/ovp/replics/ovp_limits.csv
+    primary_key: [limit_id]
+  - source_id: ovp_snapshots
+    source_type: table
+    location: ../../data/ovp/replics/ovp_snapshots.csv
+    primary_key: [snapshot_id]
+  - source_id: physical_cash_balances
+    source_type: table
+    location: ../../data/ovp/replics/physical_cash_balances.csv
+    primary_key: [balance_snapshot_id]
+  - source_id: physical_cash_operations
+    source_type: table
+    location: ../../data/ovp/replics/physical_cash_operations.csv
+    primary_key: [cash_operation_id]
+  - source_id: portfolio_mapping_rules
+    source_type: table
+    location: ../../data/ovp/replics/portfolio_mapping_rules.csv
+    primary_key: [mapping_rule_id]
+  - source_id: portfolio_movements
+    source_type: table
+    location: ../../data/ovp/replics/portfolio_movements.csv
+    primary_key: [movement_id]
+  - source_id: portfolio_reference
+    source_type: table
+    location: ../../data/ovp/replics/portfolio_reference.csv
+    primary_key: [portfolio_id]
