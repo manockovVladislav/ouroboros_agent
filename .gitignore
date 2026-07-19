@@ -37,6 +37,7 @@ configs/config.yaml
 configs/data_sources.yaml
 
 # Runtime outputs: keep directory markers only
+logs/
 outputs/**
 !outputs/evidence/
 !outputs/findings/
