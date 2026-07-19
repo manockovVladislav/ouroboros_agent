@@ -161,7 +161,18 @@ def test_gradio_interface_builds_without_starting_server():
         if component.get("type") in {"tab", "tabitem"}
     ]
     assert tab_labels == ["Аудитор — быстрый", "Аудитор + разработчик"]
-    assert len(config["dependencies"]) == 6
+    button_labels = [
+        component.get("props", {}).get("value")
+        for component in config["components"]
+        if component.get("type") == "button"
+    ]
+    assert button_labels == [
+        "Отправить",
+        "Очистить чат",
+        "Отправить",
+        "Очистить чат",
+    ]
+    assert len(config["dependencies"]) == 10
 
 
 def test_web_orchestrator_uses_external_ouroboros_task_api(tmp_path):
@@ -326,6 +337,124 @@ def test_completed_audit_is_recovered_when_outer_task_fails(tmp_path, monkeypatc
     assert events[-1]["result"]["run_id"] == "RUN-SAVED"
     assert events[-1]["result"]["recovered_from_saved_result"] is True
     assert any("Расчёты завершены" in event.get("message", "") for event in events)
+
+
+def test_saved_audit_is_returned_while_outer_task_keeps_finalizing(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(ouroboros_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(ouroboros_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        OuroborosOrchestrator, "RESULT_FINALIZATION_GRACE_SECONDS", 0
+    )
+    run_dir = tmp_path / "outputs" / "runs" / "RUN-FINALIZING"
+    run_dir.mkdir(parents=True)
+
+    class FakeClient:
+        def health(self):
+            return {"ok": True}
+
+        def create_task(self, description, workspace, timeout_seconds):
+            return {"task_id": "task-finalizing"}
+
+        def get_task(self, task_id):
+            request_path = next((tmp_path / "outputs" / "requests").glob("REQ-*.json"))
+            request_path.with_suffix(".result.json").write_text(
+                json.dumps({"run_id": "RUN-FINALIZING", "status": "COMPLETED"}),
+                encoding="utf-8",
+            )
+            return {"status": "running"}
+
+    loaded = {
+        "run_id": "RUN-FINALIZING",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(run_dir / "candidate_findings.json"),
+        "report_path": str(run_dir / "report.md"),
+    }
+    events = list(
+        OuroborosOrchestrator(
+            settings=ApplicationSettings(
+                ouroboros=OuroborosSettings(
+                    workspace=str(tmp_path),
+                    timeout_seconds=10,
+                    poll_interval_seconds=0.1,
+                )
+            ),
+            client=FakeClient(),
+            result_loader=lambda _run_id: dict(loaded),
+        ).run_with_updates("Проверить данные")
+    )
+
+    assert events[-1]["result"]["run_id"] == "RUN-FINALIZING"
+    assert any("отчёт готовы" in event.get("message", "") for event in events)
+    request_events = next(
+        (tmp_path / "outputs" / "requests").glob("*.events.jsonl")
+    ).read_text(encoding="utf-8")
+    assert "audit_returned_while_task_finalizing" in request_events
+
+
+def test_audit_is_retried_once_after_ouroboros_server_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(ouroboros_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(ouroboros_module.time, "sleep", lambda _seconds: None)
+
+    class FakeClient:
+        def __init__(self):
+            self.created = 0
+
+        def health(self):
+            return {"ok": True}
+
+        def create_task(self, description, workspace, timeout_seconds):
+            self.created += 1
+            return {"task_id": f"task-{self.created}"}
+
+        def get_task(self, task_id):
+            if task_id == "task-1":
+                return {
+                    "status": "cancelled",
+                    "error": (
+                        "Server shut down (external stop/restart signal) before "
+                        "this task finished"
+                    ),
+                }
+            return {"status": "completed", "result": "AUDIT_RUN_ID=RUN-RESTARTED"}
+
+    client = FakeClient()
+    loaded = {
+        "run_id": "RUN-RESTARTED",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(tmp_path / "candidate_findings.json"),
+        "report_path": str(tmp_path / "report.md"),
+    }
+    events = list(
+        OuroborosOrchestrator(
+            settings=ApplicationSettings(
+                ouroboros=OuroborosSettings(
+                    workspace=str(tmp_path),
+                    timeout_seconds=10,
+                    poll_interval_seconds=0.1,
+                )
+            ),
+            client=client,
+            result_loader=lambda _run_id: dict(loaded),
+        ).run_with_updates("Проверить данные")
+    )
+
+    assert client.created == 2
+    assert events[-1]["result"]["run_id"] == "RUN-RESTARTED"
+    assert any("один раз повторяю" in event.get("message", "") for event in events)
+    request_events = next(
+        (tmp_path / "outputs" / "requests").glob("*.events.jsonl")
+    ).read_text(encoding="utf-8")
+    assert '"reason":"server_shutdown_retry"' in request_events
 
 
 def test_browser_session_can_reattach_to_saved_request(tmp_path, monkeypatch):

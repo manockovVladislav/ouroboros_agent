@@ -154,6 +154,7 @@ class OuroborosOrchestrator:
     TERMINAL_STATUSES = {"completed", "failed", "cancelled", "error"}
     RUN_ID_PATTERN = re.compile(r"\bRUN-[A-Za-z0-9_.-]{1,76}\b")
     REQUEST_ID_PATTERN = re.compile(r"REQ-[a-f0-9]{32}")
+    RESULT_FINALIZATION_GRACE_SECONDS = 15.0
     CLARIFICATION_PREFIX = "AUDIT_CLARIFICATION_REQUIRED="
     IMPROVEMENT_PREFIX = "AUDIT_IMPROVEMENT_NEEDED="
     logger = logging.getLogger("audit_insight.ouroboros")
@@ -246,8 +247,10 @@ class OuroborosOrchestrator:
         event_cursor = 0
         previous_progress = ""
         clarification_retry_used = False
+        server_restart_retry_used = False
         connection_lost = False
         last_keepalive = time.monotonic()
+        saved_result_seen_at: float | None = None
         while time.monotonic() < deadline:
             try:
                 task = self.client.get_task(task_id)
@@ -389,6 +392,64 @@ class OuroborosOrchestrator:
                         yield {"kind": "result", "result": recovered}
                         return
                     detail = task.get("error") or task.get("result") or "без описания"
+                    detail_text = str(detail)
+                    if (
+                        status == "cancelled"
+                        and "Server shut down" in detail_text
+                        and not server_restart_retry_used
+                    ):
+                        server_restart_retry_used = True
+                        yield {
+                            "kind": "status",
+                            "message": (
+                                "**Сервер Ouroboros был перезапущен.** Прежняя "
+                                "задача подтверждённо остановлена; один раз повторяю "
+                                "тот же аудит по сохранённому запросу."
+                            ),
+                        }
+                        restarted = self.client.create_task(
+                            self._task_prompt(request_path),
+                            str(
+                                Path(self.settings.ouroboros.workspace)
+                                .expanduser()
+                                .resolve()
+                            ),
+                            self.settings.ouroboros.timeout_seconds,
+                        )
+                        previous_task_id = task_id
+                        task_id = str(restarted.get("task_id") or "")
+                        if not task_id:
+                            raise OuroborosConnectionError(
+                                "Ouroboros не вернул task_id после перезапуска"
+                            )
+                        append_jsonl(
+                            request_events,
+                            {
+                                "timestamp": utc_now(),
+                                "event": "ouroboros_task_created",
+                                "request_id": request_path.stem,
+                                "task_id": task_id,
+                                "replaces_task_id": previous_task_id,
+                                "reason": "server_shutdown_retry",
+                            },
+                        )
+                        self.logger.warning(
+                            "Ouroboros task restarted after server shutdown "
+                            "previous_task_id=%s task_id=%s request_id=%s",
+                            previous_task_id,
+                            task_id,
+                            request_path.stem,
+                        )
+                        deadline = (
+                            time.monotonic()
+                            + self.settings.ouroboros.timeout_seconds
+                        )
+                        previous_status = ""
+                        event_cursor = 0
+                        previous_progress = ""
+                        connection_lost = False
+                        saved_result_seen_at = None
+                        continue
                     self.logger.error(
                         "Ouroboros task failed task_id=%s status=%s detail=%s",
                         task_id,
@@ -495,6 +556,48 @@ class OuroborosOrchestrator:
                 result["chat_path"] = str(chat_path)
                 yield {"kind": "result", "result": result}
                 return
+            sidecar = request_path.with_suffix(".result.json")
+            if sidecar.is_file():
+                if saved_result_seen_at is None:
+                    saved_result_seen_at = time.monotonic()
+                    yield {
+                        "kind": "status",
+                        "message": (
+                            "**Расчёты и отчёт готовы.** Даю внешнему агенту "
+                            "короткое время на финальную сборку вывода."
+                        ),
+                    }
+                elif (
+                    time.monotonic() - saved_result_seen_at
+                    >= self.RESULT_FINALIZATION_GRACE_SECONDS
+                ):
+                    recovered = self._recover_completed_audit(
+                        request_path=request_path,
+                        user_request=user_request,
+                        task_id=task_id,
+                    )
+                    if recovered is not None:
+                        append_jsonl(
+                            request_events,
+                            {
+                                "timestamp": utc_now(),
+                                "event": "audit_returned_while_task_finalizing",
+                                "request_id": request_path.stem,
+                                "task_id": task_id,
+                                "task_status": status,
+                                "run_id": recovered["run_id"],
+                            },
+                        )
+                        yield {
+                            "kind": "status",
+                            "message": (
+                                "**Вывод собран из сохранённого аудита.** "
+                                "Внешняя финализация затянулась, поэтому интерфейс "
+                                "возвращает уже готовый результат."
+                            ),
+                        }
+                        yield {"kind": "result", "result": recovered}
+                        return
             if time.monotonic() - last_keepalive >= 15:
                 yield {
                     "kind": "status",
