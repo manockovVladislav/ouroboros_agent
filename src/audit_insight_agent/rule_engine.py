@@ -87,6 +87,19 @@ def execute_rule(
     rule: AuditRule,
 ) -> tuple[list[CandidateFinding], RuleResult]:
     try:
+        applicability = context.rule_applicability.get(rule.rule_id, {})
+        if applicability.get("status") == "INCOMPATIBLE":
+            coverage = float(applicability.get("row_coverage") or 0.0)
+            return [], RuleResult(
+                rule_id=rule.rule_id,
+                status=RuleStatus.ERROR,
+                evaluated_rows=int(applicability.get("total_rows") or 0),
+                findings_count=0,
+                error=(
+                    "Rule applicability rejected: observed values do not match "
+                    f"the configured vocabulary (row coverage {coverage:.1%})."
+                ),
+            )
         query, object_id_column = compile_rule_query(rule, context)
         bounded_query = (
             f"SELECT * FROM ({query}) AS audit_rule_matches LIMIT {rule.max_findings + 1}"

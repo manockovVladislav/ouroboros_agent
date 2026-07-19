@@ -42,7 +42,31 @@ def _load_request(path_value: str) -> dict[str, str]:
         "auditor_query": auditor_query,
         "replica_name": replica_name,
         "input_mode": input_mode,
+        "request_path": str(path),
     }
+
+
+def _write_request_result(request_path: str, result: dict) -> Path:
+    """Persist audit completion before the outer judge prepares its response."""
+
+    request = Path(request_path).resolve()
+    path = request.with_suffix(".result.json")
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "request_id": request.stem,
+                "run_id": result["run_id"],
+                "status": result["status"],
+                "report_path": result["report_path"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return path
 
 
 def main() -> None:
@@ -56,6 +80,7 @@ def main() -> None:
             request["auditor_query"],
             replica_name=request["replica_name"] or None,
         )
+        _write_request_result(request["request_path"], result)
     except Exception:
         logging.getLogger("audit_insight.ouroboros_entrypoint").exception(
             "Audit execution failed"

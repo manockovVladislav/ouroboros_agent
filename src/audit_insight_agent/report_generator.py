@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,28 @@ from .models import AgentRunResult
 Evidence и поддерживать минимум один человекочитаемый формат. Генератор не
 должен самостоятельно выполнять проверки или изменять их результаты.
 """
+
+
+def _counted(value: int, one: str, few: str, many: str) -> str:
+    remainder = value % 100
+    if 11 <= remainder <= 14:
+        form = many
+    elif value % 10 == 1:
+        form = one
+    elif 2 <= value % 10 <= 4:
+        form = few
+    else:
+        form = many
+    return f"{value} {form}"
+
+
+def _priority_label(value: str) -> str:
+    return {
+        "CRITICAL": "критический приоритет",
+        "HIGH": "высокий приоритет",
+        "MEDIUM": "средний приоритет",
+        "LOW": "низкий приоритет",
+    }.get(value, value.lower())
 
 def _write_text_atomic(
     path: Path,
@@ -50,38 +73,6 @@ def render_markdown_report(
         item.status == "POTENTIAL_RISK" for item in result.audit_plan
     )
 
-    lines: list[str] = [
-        "# Audit Insight Agent Report",
-        "",
-        f"- Run ID: `{result.run_id}`",
-        f"- Status: `{result.status.value}`",
-        f"- Agent version: `{result.agent_version}`",
-        f"- Started: `{result.started_at.isoformat()}`",
-        f"- Completed: `{result.completed_at.isoformat()}`",
-        f"- Data sources: `{len(result.data_sources)}`",
-        f"- Candidate findings: `{len(result.findings)}`",
-        f"- Confirmed findings: `{confirmed_count}`",
-        f"- Potential risks: `{potential_count}`",
-        "",
-    ]
-
-    if result.auditor_query:
-        lines.extend(["## Auditor request", "", result.auditor_query, ""])
-
-    if result.execution_errors:
-
-        lines.extend([
-            "## Execution warnings",
-            "",
-        ])
-
-        for error in result.execution_errors:
-            lines.append(
-                f"- {error}"
-            )
-
-        lines.append("")
-
     review_by_id = {item.finding_id: item for item in result.finding_reviews}
     confirmed_findings = [
         finding
@@ -89,6 +80,236 @@ def render_markdown_report(
         if review_by_id.get(finding.finding_id)
         and review_by_id[finding.finding_id].verdict == "CONFIRMED"
     ]
+    validation_count = sum(
+        item.verdict == "REQUIRES_VALIDATION" for item in result.finding_reviews
+    )
+    rejected_count = sum(
+        item.verdict == "REJECTED" for item in result.finding_reviews
+    )
+    severity_rank = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+    confirmed_findings.sort(
+        key=lambda item: (severity_rank.get(item.severity.value, 9), -item.confidence)
+    )
+    material_business_findings = [
+        finding
+        for finding in result.findings
+        if "material_business_hypothesis" in finding.tags
+    ]
+    regular_confirmed_findings = [
+        finding
+        for finding in confirmed_findings
+        if "material_business_hypothesis" not in finding.tags
+    ]
+
+    lines: list[str] = ["# Аудиторское заключение", "", "## Главный вывод", ""]
+    if confirmed_findings:
+        priority = confirmed_findings[0]
+        lines.append(
+            f"Проверка подтвердила "
+            f"{_counted(confirmed_count, 'существенное наблюдение', 'существенных наблюдения', 'существенных наблюдений')} "
+            f"из {_counted(len(result.findings), 'первоначального сигнала', 'первоначальных сигналов', 'первоначальных сигналов')}. "
+            f"Первоочередного внимания требует «{priority.title}»: "
+            f"{priority.risk or priority.summary}"
+        )
+    elif result.findings:
+        lines.append(
+            f"Проверка выявила {_counted(len(result.findings), 'сигнал', 'сигнала', 'сигналов')}, однако ни один из "
+            "них пока не обеспечен достаточными независимыми доказательствами, "
+            "чтобы назвать его подтверждённым нарушением. Поэтому результат следует "
+            "использовать как основание для адресной проверки, а не как готовое "
+            "обвинительное заключение."
+        )
+    else:
+        lines.append(
+            "Проверка не выявила подтверждённых нарушений или сигналов, требующих "
+            "разбора. Этот результат относится только к фактически выполненным "
+            "процедурам и не доказывает отсутствие риска за их пределами."
+        )
+
+    lines.extend(["", "## Ключевые основания", ""])
+    lines.append(
+        f"1. **Качество доказательств.** Подтверждено: {confirmed_count}; "
+        f"требует дополнительной проверки: {validation_count}; "
+        f"отклонено после критики доказательств: {rejected_count}."
+    )
+    completed_rules = sum(item.status.value != "ERROR" for item in result.rule_results)
+    lines.append(
+        f"2. **Охват проверки.** Проанализировано "
+        f"{_counted(len(result.data_sources), 'источник', 'источника', 'источников')} "
+        f"и выполнено {completed_rules} из {len(result.rule_results)} "
+        "запланированных контрольных процедур."
+    )
+    if confirmed_findings:
+        high_count = sum(
+            item.severity.value in {"CRITICAL", "HIGH"}
+            for item in confirmed_findings
+        )
+        lines.append(
+            f"3. **Значимость результата.** {high_count} подтверждённых "
+            "наблюдений имеют высокий или критический приоритет; выводы ниже "
+            "ранжированы по значимости, а не по порядку обнаружения."
+        )
+    else:
+        lines.append(
+            "3. **Граница вывода.** Наличие воспроизводимого срабатывания правила "
+            "подтверждает расчёт, но само по себе не доказывает бизнес-нарушение "
+            "или заявленную первопричину."
+        )
+    hypothesis_coverage = result.metrics.get("business_hypothesis_coverage") or {}
+    if hypothesis_coverage and not hypothesis_coverage.get("complete", True):
+        lines.append(
+            "4. **Заключение не прошло контроль полноты.** Как минимум одна "
+            "существенная бизнес-гипотеза не преобразована в finding или не получила "
+            "независимый review; её нельзя молча исключать из итогового вывода."
+        )
+
+    if material_business_findings:
+        lines.extend(["", "## Существенные бизнес-аномалии", ""])
+        for index, finding in enumerate(material_business_findings, start=1):
+            review = review_by_id.get(finding.finding_id)
+            constraint = finding.facts.get("semantic_constraint") or {}
+            path_targets = sorted(
+                {
+                    str(source)
+                    for path in finding.facts.get("candidate_impact_paths", [])
+                    for source in path.get("sources", [])[1:]
+                }
+            )
+            lines.extend(
+                [
+                    f"### {index}. {finding.title}",
+                    "",
+                    f"**Статус доказательств.** {review.verdict if review else 'MISSING_REVIEW'}. "
+                    f"{review.rationale if review else 'Независимая оценка доказательств отсутствует.'}",
+                    "",
+                    f"**Ожидалось.** {constraint.get('expected')!r}",
+                    "",
+                    f"**Обнаружено.** {constraint.get('actual')!r}",
+                    "",
+                    f"**Контекст.** {constraint.get('context')!r}",
+                    "",
+                    (
+                        "**Куда проверять влияние.** " + ", ".join(path_targets[:8])
+                        if path_targets
+                        else "**Куда проверять влияние.** Связанные источники не определены."
+                    ),
+                    "",
+                ]
+            )
+
+    if regular_confirmed_findings:
+        lines.extend(["", "## Подтверждённые наблюдения", ""])
+        for index, finding in enumerate(regular_confirmed_findings, start=1):
+            evidence_summary = "; ".join(
+                reference.description for reference in finding.evidence[:2]
+            )
+            lines.extend(
+                [
+                    f"### {index}. {finding.title}",
+                    "",
+                    f"**Что установлено.** {finding.summary}",
+                    "",
+                    f"**Почему это важно.** {finding.risk or 'Риск не указан.'}",
+                    "",
+                    f"**Чем подтверждается.** {evidence_summary}",
+                    "",
+                    (
+                        f"**Что сделать.** {finding.recommendation}"
+                        if finding.recommendation
+                        else "**Что сделать.** Установить владельца корректирующего действия и срок устранения."
+                    ),
+                    "",
+                ]
+            )
+
+    lines.extend(["", "## Что это означает для аудита", ""])
+    if confirmed_findings:
+        lines.append(
+            "Подтверждённые наблюдения можно включать в аудиторское заключение. "
+            "При этом масштаб последствий и первопричину следует формулировать "
+            "только в пределах приведённых доказательств."
+        )
+    elif result.findings:
+        lines.append(
+            "Формулировать нарушение в итоговом заключении преждевременно. "
+            "Сначала необходимо проверить общую причину однотипных сигналов, а "
+            "затем подтвердить оставшиеся исключения независимыми источниками."
+        )
+    else:
+        lines.append(
+            "Дополнительная эскалация по выполненным процедурам не требуется; "
+            "решение о расширении охвата принимается исходя из общего плана аудита."
+        )
+
+    lines.extend(["", "## Рекомендуемые действия", ""])
+    if result.audit_plan:
+        finding_by_id = {item.finding_id: item for item in result.findings}
+        grouped_actions: dict[tuple[str, ...], list[Any]] = {}
+        for item in result.audit_plan:
+            action = item.next_steps[0] if item.next_steps else item.rationale
+            finding = finding_by_id.get(item.finding_id or "")
+            title = item.title
+            if finding and finding.object_id:
+                title = title.replace(finding.object_id, "").rstrip(" :-")
+            key = (item.priority.value, item.status, title, item.rationale, action)
+            grouped_actions.setdefault(key, []).append(item)
+        for index, (key, items) in enumerate(grouped_actions.items(), start=1):
+            priority, _status, title, _rationale, action = key
+            scope = ""
+            if len(items) > 1:
+                object_ids = [
+                    finding_by_id[item.finding_id].object_id
+                    for item in items[:3]
+                    if item.finding_id in finding_by_id
+                    and finding_by_id[item.finding_id].object_id
+                ]
+                examples = ", ".join(f"`{value}`" for value in object_ids)
+                scope = f" Объём: {len(items)} случаев."
+                if examples:
+                    scope += f" Примеры: {examples}."
+            lines.append(
+                f"{index}. **{_priority_label(priority).capitalize()}: {title}.** "
+                f"{action}{scope} Ожидаемый результат — подтвердить нарушение "
+                "либо снять технически обусловленный сигнал."
+            )
+    else:
+        lines.append(
+            "Дополнительные действия по результатам выполненных процедур не сформированы."
+        )
+    lines.append("")
+
+    limitations = []
+    for review in result.finding_reviews:
+        for limitation in review.limitations:
+            if limitation not in limitations:
+                limitations.append(limitation)
+    lines.extend(["## Ограничения и качество анализа", ""])
+    if limitations or result.execution_errors:
+        for limitation in limitations:
+            lines.append(f"- {limitation}")
+        for error in result.execution_errors:
+            lines.append(f"- Не выполнена часть расчётов: {error}")
+    else:
+        lines.append(
+            "Существенных технических ограничений в рамках выполненных процедур не зафиксировано."
+        )
+    lines.extend(
+        [
+            "",
+            "---",
+            "",
+            "## Техническое приложение",
+            "",
+            f"- Run ID: `{result.run_id}`",
+            f"- Status: `{result.status.value}`",
+            f"- Agent version: `{result.agent_version}`",
+            f"- Started: `{result.started_at.isoformat()}`",
+            f"- Completed: `{result.completed_at.isoformat()}`",
+            "",
+        ]
+    )
+    if result.auditor_query:
+        lines.extend(["### Запрос аудитора", "", result.auditor_query, ""])
 
     lines.extend(["## Evidence critique", ""])
     if result.finding_reviews:
@@ -250,6 +471,34 @@ def render_markdown_report(
     return "\n".join(lines)
 
 
+def write_narrative_report(report_path: str | Path, narrative: str) -> Path:
+    """Put the judge's readable conclusion first while retaining audit traceability."""
+
+    path = Path(report_path).expanduser().resolve()
+    cleaned = re.sub(
+        r"(?m)^AUDIT_(?:RUN_ID|IMPROVEMENT_NEEDED|CLARIFICATION_REQUIRED)=.*$",
+        "",
+        str(narrative or ""),
+    ).strip()
+    if not cleaned or re.search(r"(?:\u2026|\.\.\.)?\[truncated\]", cleaned, re.IGNORECASE):
+        return path
+
+    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    marker = "## Техническое приложение"
+    appendix = ""
+    if marker in existing:
+        appendix = existing[existing.index(marker) :].strip()
+    elif existing:
+        appendix = f"{marker}\n\n{existing.strip()}"
+
+    cleaned = re.sub(r"\A#\s+Аудиторское заключение\s*", "", cleaned).strip()
+    content = f"# Аудиторское заключение\n\n{cleaned}"
+    if appendix:
+        content += f"\n\n---\n\n{appendix}"
+    _write_text_atomic(path, content.rstrip() + "\n")
+    return path
+
+
 def write_run_outputs(
     result: AgentRunResult,
     output_dir: str | Path,
@@ -333,6 +582,8 @@ def write_run_outputs(
         ("relationships", "relationships.json"),
         ("selected_rules", "selected_rules.json"),
         ("profiles", "profiles.json"),
+        ("data_dependencies", "data_dependencies.json"),
+        ("business_analysis", "business_analysis.json"),
     ):
         if (output_path / filename).is_file():
             manifest["files"][name] = filename
@@ -364,6 +615,12 @@ def refresh_run_manifest_files(run_dir: str | Path) -> Path:
         ("events", "events.jsonl"),
         ("rag_context", "rag_context.json"),
         ("chat", "chat.json"),
+        ("discovered_sources", "discovered_sources.json"),
+        ("relationships", "relationships.json"),
+        ("selected_rules", "selected_rules.json"),
+        ("profiles", "profiles.json"),
+        ("data_dependencies", "data_dependencies.json"),
+        ("business_analysis", "business_analysis.json"),
     ):
         if (root / filename).is_file():
             files[name] = filename

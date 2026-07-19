@@ -5,9 +5,14 @@ import pytest
 
 from audit_insight_agent.agent_system import AuditAgentSystem
 from audit_insight_agent import developer_orchestrator as developer_module
+from audit_insight_agent import ouroboros as ouroboros_module
 from audit_insight_agent.developer_orchestrator import OuroborosDeveloperOrchestrator
-from audit_insight_agent.ouroboros import OuroborosOrchestrator
+from audit_insight_agent.ouroboros import (
+    OuroborosConnectionError,
+    OuroborosOrchestrator,
+)
 from audit_insight_agent.models import ApplicationSettings, OuroborosSettings
+from audit_insight_agent.report_generator import write_narrative_report
 from audit_insight_agent.ouroboros_tools import (
     generate_report,
     list_data_sources,
@@ -15,6 +20,7 @@ from audit_insight_agent.ouroboros_tools import (
     run_rule,
 )
 from audit_insight_agent.web import build_interface
+from audit_insight_agent.web import _activity_log
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -39,14 +45,66 @@ def test_public_api_lists_profiles_and_runs_one_rule(tmp_path, monkeypatch):
     assert [item["rule_id"] for item in result["rule_results"]] == ["OVP_LIMIT_EXCEEDED"]
     assert "finding_reviews" in result
     assert "audit_plan" in result
-    assert all(item["verdict"] == "CONFIRMED" for item in result["finding_reviews"])
+    ovp_finding_ids = {
+        item["finding_id"]
+        for item in result["findings"]
+        if item["check_id"] == "OVP_LIMIT_EXCEEDED"
+    }
+    assert all(
+        item["verdict"] == "CONFIRMED"
+        for item in result["finding_reviews"]
+        if item["finding_id"] in ovp_finding_ids
+    )
     report_path = Path(generate_report("RUN-API")["report_path"])
     report = report_path.read_text(encoding="utf-8")
+    assert report.startswith("# Аудиторское заключение\n\n## Главный вывод")
+    assert "## Ключевые основания" in report
+    assert "## Рекомендуемые действия" in report
+    assert report.index("## Главный вывод") < report.index("## Evidence critique")
     assert "## Evidence critique" in report
     assert "## Prioritized audit plan" in report
-    if result["finding_reviews"]:
+    if any(item["verdict"] == "CONFIRMED" for item in result["finding_reviews"]):
         assert "## Confirmed findings" in report
         assert "Document/location:" in report
+
+
+def test_judge_narrative_becomes_canonical_report_without_losing_appendix(tmp_path):
+    report_path = tmp_path / "report.md"
+    report_path.write_text(
+        "# Аудиторское заключение\n\n## Главный вывод\n\nЧерновик.\n\n"
+        "## Техническое приложение\n\n- Run ID: `RUN-1`\n",
+        encoding="utf-8",
+    )
+
+    write_narrative_report(
+        report_path,
+        "## Главный вывод\n\nПодтверждённых нарушений нет.\n\n"
+        "## Ключевые основания\n\nДоказательств недостаточно.\n"
+        "AUDIT_RUN_ID=RUN-1",
+    )
+    first = report_path.read_text(encoding="utf-8")
+    write_narrative_report(report_path, "## Главный вывод\n\nОбновлённый вывод.")
+    second = report_path.read_text(encoding="utf-8")
+
+    assert first.startswith("# Аудиторское заключение\n\n## Главный вывод")
+    assert "AUDIT_RUN_ID" not in first
+    assert second.count("## Техническое приложение") == 1
+    assert "Обновлённый вывод." in second
+    assert "Черновик." not in second
+    assert "- Run ID: `RUN-1`" in second
+
+
+def test_truncated_judge_response_does_not_replace_complete_report(tmp_path):
+    report_path = tmp_path / "report.md"
+    complete = "# Аудиторское заключение\n\n## Главный вывод\n\nПолный вывод.\n"
+    report_path.write_text(complete, encoding="utf-8")
+
+    write_narrative_report(
+        report_path,
+        "## Главный вывод\n\nОборванный ответ…[truncated]",
+    )
+
+    assert report_path.read_text(encoding="utf-8") == complete
 
 
 def test_web_answer_summary():
@@ -57,12 +115,53 @@ def test_web_answer_summary():
             "execution_errors": [],
         }
     )
-    assert "HIGH: 1" in answer
+    assert "## Главный вывод" in answer
+    assert "внимания требует" in answer
+    assert "COMPLETED" not in answer
+
+    many = OuroborosOrchestrator._answer(
+        {
+            "status": "COMPLETED",
+            "findings": [
+                {"severity": "MEDIUM", "title": f"Finding {index}"}
+                for index in range(30)
+            ],
+            "execution_errors": [],
+        }
+    )
+    assert "30 нарушений" in many
+
+    authored = OuroborosOrchestrator._answer(
+        {
+            "status": "COMPLETED",
+            "findings": [],
+            "ouroboros_answer": "Главный вывод. Проверка завершена.",
+        }
+    )
+    assert authored == "Главный вывод. Проверка завершена."
+
+
+def test_activity_log_keeps_recent_steps_and_explains_the_work():
+    messages = [f"Шаг {index}" for index in range(15)]
+    rendered = _activity_log(messages)
+
+    assert rendered.startswith("## Ход работы")
+    assert "Шаг 0" not in rendered
+    assert "Шаг 3" in rendered
+    assert "Шаг 14" in rendered
 
 
 def test_gradio_interface_builds_without_starting_server():
     interface = build_interface()
     assert interface.__class__.__name__ == "Blocks"
+    config = interface.get_config_file()
+    tab_labels = [
+        component.get("props", {}).get("label")
+        for component in config["components"]
+        if component.get("type") in {"tab", "tabitem"}
+    ]
+    assert tab_labels == ["Аудитор — быстрый", "Аудитор + разработчик"]
+    assert len(config["dependencies"]) == 6
 
 
 def test_web_orchestrator_uses_external_ouroboros_task_api(tmp_path):
@@ -112,8 +211,222 @@ def test_web_orchestrator_uses_external_ouroboros_task_api(tmp_path):
     events = list(orchestrator.run_with_updates("Проверить"))
 
     assert events[-1]["result"]["run_id"] == "RUN-EXTERNAL"
+    started = next(event for event in events if event.get("request_id"))
+    assert started["request_id"].startswith("REQ-")
+    assert started["task_id"] == "task-1"
     assert "scripts/ouroboros_audit.py" in fake.description
     assert str(tmp_path / ".venv/bin/python") in fake.description
+
+
+def test_completed_audit_is_recovered_when_ouroboros_connection_is_lost(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(ouroboros_module, "PROJECT_ROOT", tmp_path)
+    run_dir = tmp_path / "outputs" / "runs" / "RUN-RECOVERED"
+    run_dir.mkdir(parents=True)
+    (run_dir / "report.md").write_text("# Recovered report\n", encoding="utf-8")
+
+    class FakeClient:
+        def health(self):
+            return {"ok": True}
+
+        def create_task(self, description, workspace, timeout_seconds):
+            return {"task_id": "task-recovery"}
+
+        def get_task(self, task_id):
+            request_path = next((tmp_path / "outputs" / "requests").glob("REQ-*.json"))
+            request_path.with_suffix(".result.json").write_text(
+                json.dumps(
+                    {
+                        "request_id": request_path.stem,
+                        "run_id": "RUN-RECOVERED",
+                        "status": "COMPLETED",
+                        "report_path": str(run_dir / "report.md"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            raise OuroborosConnectionError("connection lost")
+
+    loaded = {
+        "run_id": "RUN-RECOVERED",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(run_dir / "candidate_findings.json"),
+        "report_path": str(run_dir / "report.md"),
+    }
+    orchestrator = OuroborosOrchestrator(
+        settings=ApplicationSettings(
+            ouroboros=OuroborosSettings(
+                workspace=str(tmp_path),
+                timeout_seconds=10,
+                poll_interval_seconds=0.1,
+            )
+        ),
+        client=FakeClient(),
+        result_loader=lambda _run_id: dict(loaded),
+    )
+
+    events = list(orchestrator.run_with_updates("Проверить данные"))
+    result = events[-1]["result"]
+
+    assert result["run_id"] == "RUN-RECOVERED"
+    assert result["recovered_after_connection_loss"] is True
+    assert Path(result["chat_path"]).is_file()
+    assert any("аудит восстановлен" in event.get("message", "") for event in events)
+
+
+def test_completed_audit_is_recovered_when_outer_task_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(ouroboros_module, "PROJECT_ROOT", tmp_path)
+    run_dir = tmp_path / "outputs" / "runs" / "RUN-SAVED"
+    run_dir.mkdir(parents=True)
+
+    class FakeClient:
+        def health(self):
+            return {"ok": True}
+
+        def create_task(self, description, workspace, timeout_seconds):
+            return {"task_id": "task-saved"}
+
+        def get_task(self, task_id):
+            request_path = next((tmp_path / "outputs" / "requests").glob("REQ-*.json"))
+            request_path.with_suffix(".result.json").write_text(
+                json.dumps({"run_id": "RUN-SAVED", "status": "COMPLETED"}),
+                encoding="utf-8",
+            )
+            return {"status": "failed", "error": "provider disconnected"}
+
+    loaded = {
+        "run_id": "RUN-SAVED",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(run_dir / "candidate_findings.json"),
+        "report_path": str(run_dir / "report.md"),
+    }
+    events = list(
+        OuroborosOrchestrator(
+            settings=ApplicationSettings(
+                ouroboros=OuroborosSettings(
+                    workspace=str(tmp_path),
+                    timeout_seconds=10,
+                    poll_interval_seconds=0.1,
+                )
+            ),
+            client=FakeClient(),
+            result_loader=lambda _run_id: dict(loaded),
+        ).run_with_updates("Проверить данные")
+    )
+
+    assert events[-1]["result"]["run_id"] == "RUN-SAVED"
+    assert events[-1]["result"]["recovered_from_saved_result"] is True
+    assert any("Расчёты завершены" in event.get("message", "") for event in events)
+
+
+def test_browser_session_can_reattach_to_saved_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(ouroboros_module, "PROJECT_ROOT", tmp_path)
+    request_id = "REQ-" + "a" * 32
+    request_root = tmp_path / "outputs" / "requests"
+    request_root.mkdir(parents=True)
+    request_path = request_root / f"{request_id}.json"
+    request_path.write_text(
+        json.dumps({"request_id": request_id, "auditor_query": "Проверить"}),
+        encoding="utf-8",
+    )
+    request_path.with_suffix(".events.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "ouroboros_task_created",
+                "request_id": request_id,
+                "task_id": "task-before-reload",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    request_path.with_suffix(".result.json").write_text(
+        json.dumps({"run_id": "RUN-REATTACHED", "status": "COMPLETED"}),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "outputs" / "runs" / "RUN-REATTACHED"
+    run_dir.mkdir(parents=True)
+    loaded = {
+        "run_id": "RUN-REATTACHED",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(run_dir / "candidate_findings.json"),
+        "report_path": str(run_dir / "report.md"),
+    }
+    orchestrator = OuroborosOrchestrator(
+        settings=ApplicationSettings(
+            ouroboros=OuroborosSettings(workspace=str(tmp_path))
+        ),
+        client=object(),
+        result_loader=lambda _run_id: dict(loaded),
+    )
+
+    events = list(orchestrator.recover_request_with_updates(request_id))
+
+    assert events[0]["task_id"] == "task-before-reload"
+    assert events[-1]["result"]["run_id"] == "RUN-REATTACHED"
+
+
+def test_orchestrator_retries_a_temporary_connection_loss(tmp_path, monkeypatch):
+    monkeypatch.setattr(ouroboros_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(ouroboros_module.time, "sleep", lambda _seconds: None)
+
+    class FakeClient:
+        polls = 0
+
+        def health(self):
+            return {"ok": True}
+
+        def create_task(self, description, workspace, timeout_seconds):
+            return {"task_id": "task-retry"}
+
+        def get_task(self, task_id):
+            self.polls += 1
+            if self.polls == 1:
+                raise OuroborosConnectionError("temporary outage")
+            return {"status": "completed", "result": "AUDIT_RUN_ID=RUN-RETRY"}
+
+    run_dir = tmp_path / "RUN-RETRY"
+    loaded = {
+        "run_id": "RUN-RETRY",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(run_dir / "candidate_findings.json"),
+        "report_path": str(run_dir / "report.md"),
+    }
+    events = list(
+        OuroborosOrchestrator(
+            settings=ApplicationSettings(
+                ouroboros=OuroborosSettings(
+                    workspace=str(tmp_path),
+                    timeout_seconds=10,
+                    poll_interval_seconds=0.1,
+                )
+            ),
+            client=FakeClient(),
+            result_loader=lambda _run_id: dict(loaded),
+        ).run_with_updates("Проверить данные")
+    )
+
+    messages = [event.get("message", "") for event in events]
+    assert any("временно потеряна" in message for message in messages)
+    assert any("восстановлена" in message for message in messages)
+    assert events[-1]["result"]["run_id"] == "RUN-RETRY"
 
 
 def test_developer_orchestrator_uses_isolated_worktree_without_merge(

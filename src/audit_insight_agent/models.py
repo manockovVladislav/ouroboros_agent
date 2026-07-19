@@ -617,3 +617,4 @@ class AuditRuntimeContext:
     table_names: dict[str, str]
     evidence_store: Any
     relationships: dict[str, RelationshipConfig]
+    rule_applicability: dict[str, dict[str, Any]]

@@ -6,9 +6,16 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .business_analyzer import (
+    analyze_business_logic,
+    business_hypothesis_coverage,
+    business_hypothesis_plan_items,
+    investigate_business_hypotheses,
+)
 from .config import resolve_source_location
 from .data_loader import DuckDBTableStore, infer_table_format, is_database_source
 from .data_profiler import profile_table
+from .dependency_analyzer import analyze_data_dependencies
 from .evidence_store import EvidenceStore
 from .finding_builder import deduplicate_findings, review_findings_and_build_plan
 from .models import (
@@ -18,6 +25,7 @@ from .models import (
     DataSource,
     RuleStatus,
     RunStatus,
+    Severity,
 )
 from .report_generator import refresh_run_manifest_files, write_run_outputs
 from .rule_engine import execute_rules
@@ -185,6 +193,31 @@ class AuditInsightAgent:
                 f"{rule_id}: required source could not be loaded"
                 for rule_id in unavailable_rules
             )
+            dependency_analysis = analyze_data_dependencies(
+                table_store,
+                table_names,
+                profiles,
+                runnable_rules,
+            )
+            business_analysis = analyze_business_logic(
+                table_store,
+                profiles,
+                dependency_analysis,
+                [
+                    item.model_dump(mode="json")
+                    for item in workspace.relationships.relationships
+                ],
+            )
+            business_findings = investigate_business_hypotheses(
+                store=table_store,
+                analysis=business_analysis,
+                evidence_store=evidence_store,
+                run_id=actual_run_id,
+            )
+            rule_applicability = {
+                item["rule_id"]: item
+                for item in dependency_analysis["rule_applicability"]
+            }
             runtime = AuditRuntimeContext(
                 run_id=actual_run_id,
                 table_store=table_store,
@@ -194,8 +227,10 @@ class AuditInsightAgent:
                     item.relationship_id: item
                     for item in workspace.relationships.relationships
                 },
+                rule_applicability=rule_applicability,
             )
             findings, rule_results = execute_rules(runtime, runnable_rules)
+            findings.extend(business_findings)
 
         event_log.event(
             "rules_completed",
@@ -211,7 +246,34 @@ class AuditInsightAgent:
             ],
         ]
         finding_reviews, audit_plan = review_findings_and_build_plan(
-            findings, errors, source_descriptors
+            findings,
+            errors,
+            source_descriptors,
+            rule_applicability,
+        )
+        source_locations = {
+            item.source_id: item.relative_path for item in source_descriptors
+        }
+        audit_plan.extend(
+            business_hypothesis_plan_items(business_analysis, source_locations)
+        )
+        severity_order = {
+            Severity.CRITICAL: 0,
+            Severity.HIGH: 1,
+            Severity.MEDIUM: 2,
+            Severity.LOW: 3,
+        }
+        audit_plan.sort(
+            key=lambda item: (severity_order[item.priority], item.plan_id)
+        )
+        hypothesis_coverage = business_hypothesis_coverage(
+            findings,
+            finding_reviews,
+            [
+                str(item["hypothesis_id"])
+                for item in business_analysis["semantic_hypotheses"]
+                if float(item.get("confidence") or 0.0) >= 0.8
+            ],
         )
         completed_at = datetime.now(timezone.utc)
         result = AgentRunResult(
@@ -238,6 +300,11 @@ class AuditInsightAgent:
                 "skipped_rules": workspace.skipped_rules,
                 "findings_count": len(findings),
                 "evidence_count": sum(len(item.evidence_ids) for item in rule_results),
+                "rule_applicability": dependency_analysis["rule_applicability"],
+                "business_hypotheses_count": len(
+                    business_analysis["semantic_hypotheses"]
+                ),
+                "business_hypothesis_coverage": hypothesis_coverage,
                 "duration_seconds": (completed_at - started_at).total_seconds(),
             },
         )
@@ -260,6 +327,14 @@ class AuditInsightAgent:
         paths["profiles"] = _write_json(
             run_output_dir / "profiles.json",
             [profile.model_dump(mode="json") for profile in profiles],
+        )
+        paths["data_dependencies"] = _write_json(
+            run_output_dir / "data_dependencies.json",
+            dependency_analysis,
+        )
+        paths["business_analysis"] = _write_json(
+            run_output_dir / "business_analysis.json",
+            business_analysis,
         )
         refresh_run_manifest_files(run_output_dir)
         event_log.event(

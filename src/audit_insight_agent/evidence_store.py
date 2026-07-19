@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import AuditRule, EvidenceRecord
+from .models import AuditRule, EvidenceRecord, RuleKind
 
 
 def _canonical(value: Any) -> str:
@@ -45,6 +45,56 @@ def build_evidence_record(
         rule_hash=rule_hash,
         rule_kind=rule.kind,
         source_ids=rule.source_ids,
+        object_id=object_id,
+        query=query,
+        result=result,
+        created_at=datetime.now(timezone.utc),
+    )
+
+
+def build_observation_evidence_record(
+    *,
+    run_id: str,
+    check_id: str,
+    source_ids: list[str],
+    object_id: str,
+    query: str,
+    result: dict[str, Any],
+) -> EvidenceRecord:
+    """Build evidence for a reproduced read-only observation outside rule catalogues."""
+
+    rule_contract = {
+        "check_id": check_id,
+        "kind": RuleKind.CONTRADICTION.value,
+        "source_ids": sorted(source_ids),
+        "version": "1",
+    }
+    rule_hash = hashlib.sha256(
+        _canonical(rule_contract).encode("utf-8")
+    ).hexdigest()
+    content = {
+        "rule_id": check_id,
+        "rule_version": "1",
+        "rule_hash": rule_hash,
+        "rule_kind": RuleKind.CONTRADICTION.value,
+        "source_ids": source_ids,
+        "object_id": object_id,
+        "query": query,
+        "result": result,
+    }
+    checksum = hashlib.sha256(_canonical(content).encode("utf-8")).hexdigest()
+    evidence_id = "EVD-" + hashlib.sha256(
+        f"{run_id}:{checksum}".encode("utf-8")
+    ).hexdigest()[:20].upper()
+    return EvidenceRecord(
+        evidence_id=evidence_id,
+        checksum=checksum,
+        run_id=run_id,
+        rule_id=check_id,
+        rule_version="1",
+        rule_hash=rule_hash,
+        rule_kind=RuleKind.CONTRADICTION,
+        source_ids=source_ids,
         object_id=object_id,
         query=query,
         result=result,

@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 
 from .config import load_application_settings
 from .models import AgentRunResult, ApplicationSettings
-from .report_generator import refresh_run_manifest_files
+from .report_generator import refresh_run_manifest_files, write_narrative_report
 from .run_logging import RunEventLogger, append_jsonl, utc_now, write_chat_history
 from .ouroboros_tools import (
     PROJECT_ROOT,
@@ -26,6 +26,19 @@ from .ouroboros_tools import (
     _run_payload,
     _validate_run_id,
 )
+
+
+def _counted(value: int, one: str, few: str, many: str) -> str:
+    remainder = value % 100
+    if 11 <= remainder <= 14:
+        form = many
+    elif value % 10 == 1:
+        form = one
+    elif 2 <= value % 10 <= 4:
+        form = few
+    else:
+        form = many
+    return f"{value} {form}"
 
 
 class OuroborosConnectionError(RuntimeError):
@@ -140,6 +153,7 @@ class OuroborosOrchestrator:
 
     TERMINAL_STATUSES = {"completed", "failed", "cancelled", "error"}
     RUN_ID_PATTERN = re.compile(r"\bRUN-[A-Za-z0-9_.-]{1,76}\b")
+    REQUEST_ID_PATTERN = re.compile(r"REQ-[a-f0-9]{32}")
     CLARIFICATION_PREFIX = "AUDIT_CLARIFICATION_REQUIRED="
     IMPROVEMENT_PREFIX = "AUDIT_IMPROVEMENT_NEEDED="
     logger = logging.getLogger("audit_insight.ouroboros")
@@ -170,7 +184,13 @@ class OuroborosOrchestrator:
         return result
 
     def run_with_updates(self, user_request: str) -> Iterator[dict[str, Any]]:
-        yield {"kind": "status", "message": "Проверка соединения с Ouroboros…"}
+        yield {
+            "kind": "status",
+            "message": (
+                "**Проверяю готовность агента.** Убеждаюсь, что сервис "
+                "доступен и может принять задачу без потери контекста."
+            ),
+        }
         self.logger.info("Checking Ouroboros health at %s", self.settings.ouroboros.url)
         self.client.health()
         request_path = self._write_task_request(user_request)
@@ -214,15 +234,100 @@ class OuroborosOrchestrator:
 
         yield {
             "kind": "status",
-            "message": f"Ouroboros выполняет задачу `{task_id}`…",
+            "message": (
+                "**Анализ запущен.** Агент определяет доступные источники, "
+                "выполняет правила аудита и собирает доказательства для каждого вывода."
+            ),
+            "request_id": request_path.stem,
+            "task_id": task_id,
         }
         deadline = time.monotonic() + self.settings.ouroboros.timeout_seconds
         previous_status = ""
         event_cursor = 0
         previous_progress = ""
         clarification_retry_used = False
+        connection_lost = False
+        last_keepalive = time.monotonic()
         while time.monotonic() < deadline:
-            task = self.client.get_task(task_id)
+            try:
+                task = self.client.get_task(task_id)
+            except OuroborosConnectionError as error:
+                recovered = self._recover_completed_audit(
+                    request_path=request_path,
+                    user_request=user_request,
+                    task_id=task_id,
+                )
+                if recovered is not None:
+                    append_jsonl(
+                        request_events,
+                        {
+                            "timestamp": utc_now(),
+                            "event": "audit_recovered_after_connection_loss",
+                            "request_id": request_path.stem,
+                            "task_id": task_id,
+                            "run_id": recovered["run_id"],
+                        },
+                    )
+                    yield {
+                        "kind": "status",
+                        "message": (
+                            "**Связь с сервером потеряна, но аудит восстановлен.** "
+                            "Расчёты и отчёт уже были сохранены; повторный запуск не требуется."
+                        ),
+                    }
+                    yield {"kind": "result", "result": recovered}
+                    return
+                if not connection_lost:
+                    self.logger.warning(
+                        "Ouroboros connection lost task_id=%s: %s", task_id, error
+                    )
+                    append_jsonl(
+                        request_events,
+                        {
+                            "timestamp": utc_now(),
+                            "event": "ouroboros_connection_lost",
+                            "request_id": request_path.stem,
+                            "task_id": task_id,
+                            "error": str(error),
+                        },
+                    )
+                    yield {
+                        "kind": "status",
+                        "message": (
+                            "**Связь с сервером временно потеряна.** Интерфейс "
+                            "сохраняет текущие результаты и продолжает попытки восстановления."
+                        ),
+                    }
+                    connection_lost = True
+                if time.monotonic() - last_keepalive >= 15:
+                    yield {
+                        "kind": "status",
+                        "message": (
+                            "**Продолжаю восстановление связи.** Интерфейс активен, "
+                            "расчёты не запускаются повторно."
+                        ),
+                    }
+                    last_keepalive = time.monotonic()
+                time.sleep(max(1.0, self.settings.ouroboros.poll_interval_seconds))
+                continue
+            if connection_lost:
+                append_jsonl(
+                    request_events,
+                    {
+                        "timestamp": utc_now(),
+                        "event": "ouroboros_connection_restored",
+                        "request_id": request_path.stem,
+                        "task_id": task_id,
+                    },
+                )
+                yield {
+                    "kind": "status",
+                    "message": (
+                        "**Связь с сервером восстановлена.** Продолжаю задачу "
+                        "с сохранённого состояния."
+                    ),
+                }
+                connection_lost = False
             status = str(task.get("status") or "unknown").lower()
             if status != previous_status:
                 append_jsonl(
@@ -237,7 +342,7 @@ class OuroborosOrchestrator:
                 )
                 yield {
                     "kind": "status",
-                    "message": f"Ouroboros: **{status}** (`{task_id}`)",
+                    "message": self._status_message(status),
                 }
                 previous_status = status
             event_reader = getattr(self.client, "get_task_events", None)
@@ -256,6 +361,33 @@ class OuroborosOrchestrator:
                         previous_progress = progress
             if status in self.TERMINAL_STATUSES:
                 if status != "completed":
+                    recovered = self._recover_completed_audit(
+                        request_path=request_path,
+                        user_request=user_request,
+                        task_id=task_id,
+                    )
+                    if recovered is not None:
+                        append_jsonl(
+                            request_events,
+                            {
+                                "timestamp": utc_now(),
+                                "event": "audit_recovered_after_task_failure",
+                                "request_id": request_path.stem,
+                                "task_id": task_id,
+                                "task_status": status,
+                                "run_id": recovered["run_id"],
+                            },
+                        )
+                        yield {
+                            "kind": "status",
+                            "message": (
+                                "**Расчёты завершены и восстановлены.** Внешний "
+                                "агент потерял связь уже после сохранения аудита; "
+                                "повторный запуск не требуется."
+                            ),
+                        }
+                        yield {"kind": "result", "result": recovered}
+                        return
                     detail = task.get("error") or task.get("result") or "без описания"
                     self.logger.error(
                         "Ouroboros task failed task_id=%s status=%s detail=%s",
@@ -339,6 +471,10 @@ class OuroborosOrchestrator:
                 )
                 run_dir = Path(result["candidate_findings_path"]).parent
                 result["answer"] = self._answer(result)
+                report_path = write_narrative_report(
+                    result.get("report_path") or run_dir / "report.md",
+                    result["answer"],
+                )
                 chat_path = write_chat_history(
                     run_dir,
                     run_id=run_id,
@@ -352,17 +488,163 @@ class OuroborosOrchestrator:
                     task_id=task_id,
                     request_id=request_path.stem,
                     chat_path=str(chat_path),
+                    report_path=str(report_path),
                 )
                 if (run_dir / "run_manifest.json").is_file():
                     refresh_run_manifest_files(run_dir)
                 result["chat_path"] = str(chat_path)
                 yield {"kind": "result", "result": result}
                 return
+            if time.monotonic() - last_keepalive >= 15:
+                yield {
+                    "kind": "status",
+                    "message": (
+                        "**Анализ продолжается.** Соединение с интерфейсом "
+                        "активно; итоговый результат ещё не сформирован."
+                    ),
+                }
+                last_keepalive = time.monotonic()
             time.sleep(self.settings.ouroboros.poll_interval_seconds)
         raise TimeoutError(
             f"Ouroboros не завершил задачу {task_id} за "
             f"{self.settings.ouroboros.timeout_seconds} секунд"
         )
+
+    def recover_request_with_updates(
+        self, request_id: str
+    ) -> Iterator[dict[str, Any]]:
+        """Reattach a new browser session to a task created before a reload."""
+
+        request_id = str(request_id or "").strip()
+        if not self.REQUEST_ID_PATTERN.fullmatch(request_id):
+            raise ValueError("Некорректный request_id для восстановления")
+        request_path = PROJECT_ROOT / "outputs" / "requests" / f"{request_id}.json"
+        if not request_path.is_file():
+            raise FileNotFoundError("Сохранённый web-запрос не найден")
+        payload = json.loads(request_path.read_text(encoding="utf-8"))
+        user_request = str(payload.get("auditor_query") or "").strip()
+        task_id = self._saved_task_id(request_path)
+        if not user_request or not task_id:
+            raise RuntimeError("В сохранённом запросе нет данных для восстановления")
+
+        yield {
+            "kind": "status",
+            "message": (
+                "**Восстанавливаю активный анализ.** Страница была перезагружена, "
+                "но задача не запускается повторно; жду её сохранённый результат."
+            ),
+            "request_id": request_id,
+            "task_id": task_id,
+        }
+        deadline = time.monotonic() + self.settings.ouroboros.timeout_seconds
+        last_keepalive = time.monotonic()
+        while time.monotonic() < deadline:
+            recovered = self._recover_completed_audit(
+                request_path=request_path,
+                user_request=user_request,
+                task_id=task_id,
+            )
+            if recovered is not None:
+                append_jsonl(
+                    request_path.with_suffix(".events.jsonl"),
+                    {
+                        "timestamp": utc_now(),
+                        "event": "web_session_reattached",
+                        "request_id": request_id,
+                        "task_id": task_id,
+                        "run_id": recovered["run_id"],
+                    },
+                )
+                yield {"kind": "result", "result": recovered}
+                return
+            try:
+                task = self.client.get_task(task_id)
+            except OuroborosConnectionError:
+                task = {}
+            status = str(task.get("status") or "").lower()
+            if status in self.TERMINAL_STATUSES and status != "completed":
+                detail = task.get("error") or task.get("result") or "без описания"
+                raise RuntimeError(
+                    f"Задача Ouroboros завершилась как {status}: {detail}"
+                )
+            if time.monotonic() - last_keepalive >= 15:
+                yield {
+                    "kind": "status",
+                    "message": (
+                        "**Анализ продолжается.** Новая web-сессия подключена "
+                        "к прежней задаче и ждёт её результат."
+                    ),
+                    "request_id": request_id,
+                    "task_id": task_id,
+                }
+                last_keepalive = time.monotonic()
+            time.sleep(max(1.0, self.settings.ouroboros.poll_interval_seconds))
+        raise TimeoutError(
+            f"Не удалось восстановить результат задачи {task_id} за "
+            f"{self.settings.ouroboros.timeout_seconds} секунд"
+        )
+
+    @staticmethod
+    def _saved_task_id(request_path: Path) -> str:
+        events_path = request_path.with_suffix(".events.jsonl")
+        if not events_path.is_file():
+            return ""
+        task_id = ""
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("event") == "ouroboros_task_created" and event.get("task_id"):
+                task_id = str(event["task_id"])
+        return task_id
+
+    def _recover_completed_audit(
+        self,
+        *,
+        request_path: Path,
+        user_request: str,
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        sidecar = request_path.with_suffix(".result.json")
+        if not sidecar.is_file():
+            return None
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            run_id = str(payload.get("run_id") or "")
+            if not self.RUN_ID_PATTERN.fullmatch(run_id):
+                return None
+            result = self.result_loader(run_id)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError):
+            self.logger.exception(
+                "Could not recover completed audit request_id=%s", request_path.stem
+            )
+            return None
+        result["ouroboros_answer"] = ""
+        result["answer"] = self._answer(result)
+        result["improvement_needed"] = False
+        result["improvement_reason"] = ""
+        result["recovered_after_connection_loss"] = True
+        result["recovered_from_saved_result"] = True
+        run_dir = Path(result["candidate_findings_path"]).parent
+        chat_path = write_chat_history(
+            run_dir,
+            run_id=run_id,
+            task_id=task_id,
+            user_request=user_request,
+            ouroboros_answer=result["answer"],
+        )
+        RunEventLogger(run_dir, run_id).event(
+            "ouroboros_result_recovered",
+            task_id=task_id,
+            request_id=request_path.stem,
+            sidecar_path=str(sidecar),
+            chat_path=str(chat_path),
+        )
+        if (run_dir / "run_manifest.json").is_file():
+            refresh_run_manifest_files(run_dir)
+        result["chat_path"] = str(chat_path)
+        return result
 
     def _write_task_request(self, user_request: str) -> Path:
         request_root = PROJECT_ROOT / "outputs" / "requests"
@@ -474,11 +756,12 @@ AUDIT_CLARIFICATION_REQUIRED. Не спрашивай о реплике, source_
 
 Не выбирай одну систему вместо других. Сразу выполни команду в workspace точно с таким argv:
 {json.dumps(command, ensure_ascii=False)}
-Команда запустит табличные правила, RAG по документам и создаст evidence, candidate_findings.json и report.md.
-После запуска прочитай только созданные report.md и candidate_findings.json.
-Дай краткий аудиторский вывод только после раздела Evidence critique. Не выдавай POTENTIAL_RISK за
-найденное нарушение. Для каждого CONFIRMED укажи, что найдено, в какой таблице/документе и какой
-факт это подтверждает. Затем кратко изложи ранжированный Prioritized audit plan. Опирайся только на эти артефакты.
+Команда запустит табличные правила, RAG по документам, профилирование, поиск зависимостей и анализ бизнес-lineage. Она создаст evidence, candidate_findings.json, report.md, profiles.json, relationships.json, selected_rules.json, data_dependencies.json и business_analysis.json.
+После запуска изучи report.md, candidate_findings.json, profiles.json, relationships.json, selected_rules.json, data_dependencies.json и business_analysis.json. Для существенных или противоречивых сигналов прочитай также конфигурацию сработавшего правила и релевантный код его исполнения. Это разрешённое read-only исследование, а не изменение кода.
+Гипотезы из business_analysis.json и candidate_impact_paths используй для навигации по источникам. Они не доказывают причинность и не могут сами по себе повысить POTENTIAL_RISK до CONFIRMED. При этом finding с тегом material_business_hypothesis запрещено игнорировать: выполни указанный reproduction query, проверь нормативное evidence и явно сообщи его вердикт. Перед завершением проверь metrics.business_hypothesis_coverage: для каждой существенной гипотезы должен существовать finding и review. Если verdict REQUIRES_VALIDATION, укажи недостающее доказательство; если CONFIRMED — включи её в главный вывод и проследи доступные последствия. Не утверждай, что бизнес-гипотезы согласуются с выводом, если они не разобраны по отдельности.
+Перед тем как назвать сигнал нарушением, проверь: (1) покрывает ли словарь правила фактические значения; (2) подтверждены ли связи между источниками; (3) не спутана ли техническая воспроизводимость с семантической достоверностью. Никогда не объявляй нарушение CONFIRMED, если rule_applicability имеет статус PARTIAL или INCOMPATIBLE.
+Весь ответ напиши на русском языке по принципу пирамиды Барбары Минто и уложи в 800 слов. Первая строка ответа — `## Главный вывод`; до неё запрещены Evidence critique, описание выполненных шагов и любые технические оговорки. В первом абзаце сразу ответь, что установлено, насколько вывод доказан и что это означает для аудитора. Затем используй разделы `## Ключевые основания`, `## Что это означает для аудита`, `## Рекомендуемые действия` и `## Ограничения и качество доказательств`. Аргументы должны быть непересекающимися, ранжированными по значимости и подтверждать главный вывод сверху вниз. Дай не более четырёх ключевых оснований и пяти действий. Сгруппируй однотипные сигналы: не повторяй десятки одинаковых карточек и не превращай заключение в журнал работы. Ответ обязан быть завершённым: не обрывай предложения и не пропускай обязательные разделы ради перечисления однотипных случаев.
+Пиши связным текстом, понятным руководителю без технического контекста: расшифровывай необходимые термины при первом употреблении, не выводи служебные статусы, run_id, имена внутренних инструментов или пути к файлам. Не выдавай POTENTIAL_RISK за найденное нарушение. Для каждого CONFIRMED сообщи, что найдено, где проявилось, какой независимый факт это подтверждает и каков эффект. Ранжированный план действий формулируй как решение: действие, ожидаемый результат и приоритет. Техническую оценку доказательств помести только в последний раздел и изложи человеческим языком.
 Отдельно оцени, не помешал ли
 системный пробел в общем коде, правилах, RAG или промптах. Не считай пробелом отсутствие нарушений или
 нехватку данных. Если общая возможность реального аудита отсутствовала, добавь строку:
@@ -524,12 +807,25 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
         if event_type == "tool_call":
             tool = str(data.get("tool") or data.get("name") or "").strip()
             labels = {
-                "run_shell": "Запускаю аудиторские расчёты…",
-                "read_file": "Изучаю структуру данных и документы…",
-                "list_files": "Определяю доступные источники…",
+                "run_shell": (
+                    "**Выполняю аудиторские расчёты.** Проверяю данные по заданным "
+                    "правилам и сохраняю воспроизводимые результаты."
+                ),
+                "read_file": (
+                    "**Изучаю источники.** Сопоставляю структуру данных и содержание "
+                    "документов, чтобы привязать выводы к конкретным фактам."
+                ),
+                "list_files": (
+                    "**Определяю область проверки.** Составляю перечень доступных "
+                    "таблиц и документов, чтобы не пропустить существенный источник."
+                ),
             }
             if tool:
-                return labels.get(tool, f"Ouroboros выполняет: `{tool}`…")
+                return labels.get(
+                    tool,
+                    "**Выполняю следующий шаг анализа.** Агент обрабатывает "
+                    "полученные данные и готовит основание для итогового вывода.",
+                )
         if event_type in {"progress", "message"}:
             value = next(
                 (
@@ -543,6 +839,28 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
             if value and len(value) <= 240:
                 return value
         return ""
+
+    @staticmethod
+    def _status_message(status: str) -> str:
+        messages = {
+            "pending": (
+                "**Задача поставлена в очередь.** Агент получил контекст и начнёт "
+                "анализ, как только освободятся ресурсы."
+            ),
+            "running": (
+                "**Агент работает над задачей.** Сейчас он собирает и проверяет "
+                "доказательства; итоговые выводы ещё не сформированы."
+            ),
+            "completed": (
+                "**Основной анализ завершён.** Агент переходит к сборке итога, "
+                "отделяя подтверждённые нарушения от направлений, которые требуют дополнительной проверки."
+            ),
+        }
+        return messages.get(
+            status,
+            "**Состояние задачи изменилось.** Агент продолжает работу; "
+            "новые результаты появятся в этой ленте по мере готовности.",
+        )
 
     @classmethod
     def _extract_run_id(cls, task_result: Any) -> str:
@@ -577,7 +895,14 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
         rag_context = run_dir / "rag_context.json"
         if rag_context.is_file():
             paths["rag_context"] = rag_context
-        for name in ("discovered_sources", "profiles", "relationships", "selected_rules"):
+        for name in (
+            "discovered_sources",
+            "profiles",
+            "relationships",
+            "selected_rules",
+            "data_dependencies",
+            "business_analysis",
+        ):
             artifact = run_dir / f"{name}.json"
             if artifact.is_file():
                 paths[name] = artifact
@@ -585,6 +910,9 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
 
     @staticmethod
     def _answer(result: dict[str, Any]) -> str:
+        narrative = str(result.get("ouroboros_answer") or "").strip()
+        if narrative:
+            return narrative
         findings = result.get("findings", [])
         reviews = result.get("finding_reviews", [])
         confirmed_ids = {
@@ -598,29 +926,73 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
             else findings
         )
         severity_counts = Counter(item.get("severity", "UNKNOWN") for item in confirmed)
-        severity_text = ", ".join(
-            f"{severity}: {count}"
-            for severity, count in sorted(severity_counts.items())
-        ) or "нет"
-        titles = [item.get("title", "Без названия") for item in confirmed[:5]]
-        lines = []
-        if result.get("ouroboros_answer"):
-            lines.extend([str(result["ouroboros_answer"]), "---"])
-        lines.extend([
-            f"Анализ завершён со статусом {result['status']}.",
-            f"Подтверждённых выводов: {len(confirmed)}; по критичности: {severity_text}.",
-        ])
-        if titles:
-            lines.append("Подтверждёно: " + "; ".join(titles) + ".")
+        high_count = severity_counts.get("CRITICAL", 0) + severity_counts.get("HIGH", 0)
+        lines = ["## Главный вывод"]
+        if confirmed:
+            priority = confirmed[0].get("title", "первое по приоритету нарушение")
+            if len(confirmed) == 1:
+                conclusion = "Аудит подтвердил одно нарушение."
+            else:
+                finding_count = _counted(
+                    len(confirmed), "нарушение", "нарушения", "нарушений"
+                )
+                conclusion = f"Аудит подтвердил {finding_count}."
+            if high_count == 1:
+                urgency = (
+                    " Оно имеет высокую или критическую значимость."
+                    if len(confirmed) == 1
+                    else " Одно из них имеет высокую или критическую значимость."
+                )
+            elif high_count:
+                urgency = f" {high_count} из них имеют высокую или критическую значимость."
+            else:
+                urgency = ""
+            lines.append(
+                f"{conclusion}{urgency} Первоочередного внимания требует «{priority}»."
+            )
+        else:
+            lines.append(
+                "Аудит не выявил нарушений, для которых собраны достаточные "
+                "доказательства. Это снижает текущую оценку риска, но не доказывает полное отсутствие нарушений."
+            )
+        if confirmed:
+            lines.append("## Обоснование")
+            for index, finding in enumerate(confirmed[:5], 1):
+                title = finding.get("title", "Без названия")
+                summary = str(finding.get("summary") or "").strip()
+                risk = str(finding.get("risk") or "").strip()
+                paragraph = f"{index}. **{title}.** {summary}"
+                if risk:
+                    paragraph += f" Это создаёт риск: {risk}"
+                lines.append(paragraph)
         potential_count = sum(
             item.get("status") == "POTENTIAL_RISK"
             for item in result.get("audit_plan", [])
         )
+        plan = result.get("audit_plan", [])
+        if plan:
+            lines.append("## Что делать дальше")
+            for index, item in enumerate(plan[:5], 1):
+                title = item.get("title", "Дополнительная проверка")
+                next_steps = [str(step) for step in item.get("next_steps", []) if step]
+                action = next_steps[0] if next_steps else item.get("rationale", "")
+                lines.append(f"{index}. **{title}.** {action}".strip())
         if potential_count:
+            risk_count = _counted(
+                potential_count, "потенциальный риск", "потенциальных риска", "потенциальных рисков"
+            )
             lines.append(
-                f"Потенциальных направлений для дополнительной проверки: {potential_count}."
+                f"План содержит {risk_count}. "
+                "Они не считаются нарушениями, пока дополнительная проверка не даст "
+                "достаточных доказательств."
             )
         errors = result.get("execution_errors", [])
         if errors:
-            lines.append(f"Ошибок выполнения: {len(errors)}. Подробности сохранены в отчёте.")
+            failed_checks = _counted(
+                len(errors), "проверку", "проверки", "проверок"
+            )
+            lines.extend([
+                "## Ограничения",
+                f"Во время анализа не удалось выполнить {failed_checks}. Поэтому итог нужно трактовать с учётом неполного покрытия; подробности сохранены в отчёте."
+            ])
         return "\n\n".join(lines)

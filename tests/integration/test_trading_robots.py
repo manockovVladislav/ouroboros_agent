@@ -15,15 +15,25 @@ def test_trading_robot_rule_finds_logged_limit_bypass(tmp_path):
         tmp_path,
     )
 
-    assert len(result.findings) == 1
-    finding = result.findings[0]
+    finding = next(
+        item
+        for item in result.findings
+        if item.check_id == "ROBOT_ACCEPTED_ORDER_OVER_LIMIT"
+    )
     assert finding.object_id == "ORD-1002"
     assert finding.severity.value == "CRITICAL"
     assert finding.facts["calculated_notional_usd"] == 12500.0
-    assert result.finding_reviews[0].verdict == "CONFIRMED"
+    review = next(
+        item
+        for item in result.finding_reviews
+        if item.finding_id == finding.finding_id
+    )
+    assert review.verdict == "CONFIRMED"
     assert any(
         "robot_orders.csv" in location
-        for location in result.audit_plan[0].source_locations
+        for plan in result.audit_plan
+        if plan.finding_id == finding.finding_id
+        for location in plan.source_locations
     )
     report = paths["report"].read_text(encoding="utf-8")
     assert "ORD-1002" in report

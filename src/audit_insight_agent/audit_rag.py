@@ -4,9 +4,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
+from .business_analyzer import business_hypothesis_coverage
 from .config import resolve_source_location
 from .finding_builder import review_findings_and_build_plan
 from .document_loader import DOCUMENT_FORMATS, load_document_chunks
@@ -66,6 +68,54 @@ def _write_json_atomic(path: Path, value: Any) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _constraint_values(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        result = []
+        for nested in value.values():
+            result.extend(_constraint_values(nested))
+        return result
+    if isinstance(value, (list, tuple, set)):
+        result = []
+        for nested in value:
+            result.extend(_constraint_values(nested))
+        return result
+    text = str(value or "").strip().casefold()
+    return [text] if len(text) >= 2 else []
+
+
+def _supports_semantic_constraint(text: str, finding: Any) -> bool:
+    constraint = finding.facts.get("semantic_constraint") or {}
+    expected = _constraint_values(constraint.get("expected"))
+    context = _constraint_values(constraint.get("context"))
+    if not expected or not context:
+        return False
+    normalized = re.sub(r"\s+", " ", text.casefold())
+    normative_markers = (
+        "должен",
+        "должна",
+        "должно",
+        "требуется",
+        "не допускается",
+        "запрещ",
+        "must",
+        "required",
+        "shall",
+        "not allowed",
+        "prohibited",
+    )
+    return (
+        any(marker in normalized for marker in normative_markers)
+        and any(value in normalized for value in expected)
+        and any(value in normalized for value in context)
+    )
+
+
+def _grounding_group(finding: Any) -> str:
+    if "semantic_constraint" in finding.tags:
+        return finding.finding_id
+    return finding.check_id
 
 
 def _collect_document_sources(
@@ -214,11 +264,11 @@ def ground_audit_with_documents(
 
     representatives: dict[str, Any] = {}
     for finding in result.findings:
-        representatives.setdefault(finding.check_id, finding)
+        representatives.setdefault(_grounding_group(finding), finding)
 
     searches: dict[str, dict[str, Any]] = {}
-    references_by_check: dict[str, list[EvidenceReference]] = {}
-    for check_id, finding in representatives.items():
+    references_by_group: dict[str, list[EvidenceReference]] = {}
+    for group_id, finding in representatives.items():
         search_query = " ".join(
             part
             for part in (
@@ -232,16 +282,17 @@ def ground_audit_with_documents(
         matches = retriever.search(search_query, limit=3)
         event_log.event(
             "rag_search_completed",
-            check_id=check_id,
+            check_id=finding.check_id,
+            grounding_group=group_id,
             query_length=len(search_query),
             matches=len(matches),
             top_scores=[match.score for match in matches],
         )
-        searches[check_id] = {
+        searches[group_id] = {
             "query": search_query,
             "matches": [match.model_dump(mode="json") for match in matches],
         }
-        references_by_check[check_id] = [
+        references_by_group[group_id] = [
             EvidenceReference(
                 checksum=hashlib.sha256(
                     f"{match.chunk.chunk_id}:{match.chunk.text}".encode("utf-8")
@@ -255,6 +306,11 @@ def ground_audit_with_documents(
                     "start_char": match.chunk.start_char,
                     "end_char": match.chunk.end_char,
                     "metadata": match.chunk.metadata,
+                    "semantic_constraint_match": (
+                        _supports_semantic_constraint(match.chunk.text, finding)
+                        if "semantic_constraint" in finding.tags
+                        else False
+                    ),
                 },
                 query=search_query,
             )
@@ -266,7 +322,7 @@ def ground_audit_with_documents(
             update={
                 "evidence": [
                     *finding.evidence,
-                    *references_by_check.get(finding.check_id, []),
+                    *references_by_group.get(_grounding_group(finding), []),
                 ],
                 "tags": list(dict.fromkeys([*finding.tags, "rag_grounded"])),
             }
@@ -294,8 +350,25 @@ def ground_audit_with_documents(
     }
     errors = [*result.execution_errors, *document_errors]
     all_data_sources = [*result.data_sources, *document_descriptors]
+    rule_applicability = {
+        item["rule_id"]: item
+        for item in result.metrics.get("rule_applicability", [])
+        if isinstance(item, dict) and item.get("rule_id")
+    }
     finding_reviews, audit_plan = review_findings_and_build_plan(
-        grounded_findings, errors, all_data_sources
+        grounded_findings,
+        errors,
+        all_data_sources,
+        rule_applicability,
+    )
+    metrics["business_hypothesis_coverage"] = business_hypothesis_coverage(
+        grounded_findings,
+        finding_reviews,
+        list(
+            (
+                result.metrics.get("business_hypothesis_coverage") or {}
+            ).get("expected_hypothesis_ids", [])
+        ),
     )
     grounded = result.model_copy(
         update={
@@ -319,7 +392,7 @@ def ground_audit_with_documents(
             "errors": document_errors,
         },
     )
-    updated_paths = write_run_outputs(grounded, run_dir)
+    updated_paths = {**paths, **write_run_outputs(grounded, run_dir)}
     updated_paths["rag_context"] = rag_context_path
     event_log.event(
         "rag_completed",
