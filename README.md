@@ -12,7 +12,6 @@ Gradio web :7860
             ├─ BGE-M3 + Qdrant :6333: поиск по документам
             ├─ Rule engine: quality, reconciliation, timeline, anomaly
             └─ outputs/runs/<run_id>/: evidence, findings, report
-                → audit-evaluator (если настроен)
 ```
 
 Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py` их не запускает.
@@ -21,28 +20,22 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 
 ```text
 .
-├─ cases/
-│  ├─ README.md
-│  └─ physical_currency_ovp/
-│     ├─ data_sources.yaml
-│     ├─ relationships.yaml
-│     ├─ prompts/auditor_context.md
-│     └─ rules/                 # 4 YAML-правила текущей проверки
 ├─ configs/
 │  ├─ config.example.yaml
 │  ├─ data_sources.example.yaml
 │  └─ logging.yaml
 ├─ data/
-│  └─ ovp/                     # CSV, DOCX и PDF текущей проверки
+│  ├─ ovp/                     # CSV, DOCX и PDF проверки ОВП
+│  └─ robots/                  # C++, Java, Confluence и журналы роботов
 ├─ knowledge/
 │  ├─ documents/
 │  └─ metadata/
 ├─ rules/
 │  ├─ access_control/
-│  ├─ cash/
+│  ├─ cash/                    # правила кассы и timeline
 │  ├─ data_quality/
-│  ├─ market_operations/
-│  └─ ovp/
+│  ├─ market_operations/       # правила торговых операций
+│  └─ ovp/                     # правила и связи ОВП
 ├─ prompts/
 │  ├─ system_prompt.md
 │  ├─ audit_analysis.md
@@ -68,12 +61,12 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 │  ├─ audit_rag.py            # индексация и RAG-grounding выводов
 │  ├─ rule_engine.py, analysis_tools.py, anomaly_detector.py
 │  ├─ reconciliation.py, evidence_store.py, finding_builder.py
-│  ├─ report_generator.py, case_package.py
+│  ├─ report_generator.py, workspace.py
 │  ├─ ouroboros_tools.py       # публичный API аудита
 │  ├─ ouroboros.py             # HTTP-клиент Ouroboros
 │  ├─ web.py, cli.py           # Gradio и CLI
-│  ├─ evaluator_adapter.py, developer_tools.py
-│  └─ logging_config.py
+│  ├─ developer_orchestrator.py, developer_tools.py
+│  └─ logging_config.py, run_logging.py
 ├─ templates/
 │  ├─ finding.md.j2
 │  └─ report.md.j2
@@ -85,13 +78,13 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 │  ├─ architecture.md
 │  ├─ deployment.md
 │  ├─ developer_mode.md
-│  ├─ evaluator.md
 │  └─ rules.md
 ├─ outputs/
 │  ├─ evidence/
 │  ├─ findings/
 │  ├─ reports/
 │  └─ runs/                    # артефакты по run_id
+├─ logs/                            # ротируемый audit-insight.log
 ├─ .env.example
 ├─ .gitignore
 ├─ pyproject.toml
@@ -102,13 +95,49 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 
 ## Куда класть файлы
 
-- Данные текущей проверки: `data/ovp/`. Таблицы и PDF, DOCX, Markdown, TXT, HTML могут лежать вместе.
+- Любые входные данные: `data/` и любые её подпапки. Агент читает CSV, Excel, Parquet, JSON, PDF, DOCX, Markdown, TXT, HTML, C/C++ и Java.
 - Дополнительные знания и нормативные документы: `knowledge/`.
-- Описания текущих файлов и связей: `cases/physical_currency_ovp/data_sources.yaml` и `relationships.yaml`.
-- Правила текущей проверки: `cases/physical_currency_ovp/rules/`; общие группы: `rules/`.
+- Декларативные правила и связи: `rules/`. Правило запускается только когда все его `source_ids` автоматически найдены.
+- Общие и предметные промпты: `prompts/`.
 - Результаты создаются автоматически в `outputs/runs/<run_id>/`.
 
-При полном web-аудите агент автоматически находит документы в `data/` и `knowledge/`, индексирует изменённый набор в Qdrant и добавляет релевантные фрагменты к evidence каждой группы выводов.
+При web-аудите агент автоматически находит таблицы и документы, профилирует все таблицы, выбирает применимые правила, индексирует документы в Qdrant и сохраняет обнаруженную структуру в артефактах run.
+
+## PostgreSQL и Greenplum
+
+Реплики регистрируются в `configs/config.yaml`; пароль хранится только в environment:
+
+```yaml
+databases:
+  connections:
+    replica_a:
+      engine: postgresql       # или greenplum
+      host: db-read.example.local
+      port: 5432
+      database: audit_db
+      user: audit_readonly
+      password_env: AUDIT_REPLICA_A_PASSWORD
+      sslmode: require
+```
+
+Источник в `data_sources.yaml` может ссылаться на точный alias или на alias из запроса аудитора:
+
+```yaml
+- source_id: accounting_entries
+  source_type: table
+  format: postgresql
+  connection: $selected
+  location: audit.accounting_entries
+  # Вместо location можно задать один read-only SELECT/WITH:
+  # query: SELECT entry_id, amount, operation_date FROM audit.accounting_entries
+```
+
+В чате alias нужно назвать точно, например: `проверь replica_a`. Произвольные DSN из чата не
+принимаются. Коннектор принудительно включает read-only transaction, читает данные пакетами и переносит их в DuckDB.
+
+```bash
+export AUDIT_REPLICA_A_PASSWORD="..."
+```
 
 ## Установка
 
@@ -135,12 +164,12 @@ ouroboros:
 ```
 
 `/path/to/...` нужно заменить на пути в своём окружении.
-Если используется Conda, в `python_executable` нужно указать пут, который выводит `which python` в активированном окружении Audit Agent.
+Если используется Conda, в `python_executable` нужно указать путь, который выводит `which python` в активированном окружении Audit Agent.
 
 Проверка зависимостей:
 
 ```bash
-python -c "import duckdb, gradio, qdrant_client, sentence_transformers, docx, pypdf; print('dependencies: OK')"
+python -c "import duckdb, gradio, psycopg, qdrant_client, sentence_transformers, docx, pypdf; print('dependencies: OK')"
 ```
 
 Dashboard Qdrant: <http://127.0.0.1:6333/dashboard>. В конфиге указывается базовый API URL без `/dashboard`.
@@ -180,20 +209,56 @@ source .venv/bin/activate
 python scripts/run_web.py
 ```
 
-Открыть <http://127.0.0.1:7860>. Интерфейс показывает статус задачи Ouroboros, ответ агента, findings, `run_id` и файл отчёта.
+Открыть <http://127.0.0.1:7860> и отправить один обычный аудиторский запрос. Интерфейс кратко
+показывает текущий этап, ответ, findings, `run_id` и отчёт. Если в `configs/config.yaml` включён
+`self_improvement.enabled` и `self_improvement.review_after_every_audit`, Ouroboros после
+каждого аудита проводит review. При обоснованном системном пробеле он может
+изменить код, правила, RAG, промпты и тесты в isolated worktree. Система сама запускает
+`pytest` и сохраняет patch, но не делает commit или merge. Вводить `run_id` вручную или
+переключать ветку не нужно.
+Подробнее: [docs/developer_mode.md](docs/developer_mode.md).
 
-## CLI и индексация
+## Логи и история
 
-Загрузка источников из YAML и построение индекса:
+Общий журнал web, CLI, Ouroboros-шлюза и аудиторского ядра:
+
+```text
+logs/audit-insight.log
+```
+
+Файл ротируется при размере 10 МБ; хранится до 10 архивов. Путь можно переопределить через `AUDIT_LOG_DIR`.
+
+Каждый аудит сохраняет отдельную машиночитаемую историю:
+
+```text
+outputs/runs/<run_id>/
+├─ events.jsonl              # этапы, статусы, ошибки и метрики
+├─ chat.json                 # запрос аудитора, ответ и Ouroboros task_id
+├─ discovered_sources.json   # автоматически найденные источники
+├─ profiles.json             # структура и качество таблиц
+├─ relationships.json        # применимые связи
+├─ selected_rules.json       # выбранные и пропущенные правила
+├─ candidate_findings.json
+├─ rag_context.json
+├─ report.md
+├─ run_manifest.json
+└─ evidence/
+```
+
+Наблюдение за общим логом:
 
 ```bash
-audit-insight ingest --config cases/physical_currency_ovp/data_sources.yaml --settings configs/config.yaml
+tail -f logs/audit-insight.log
 ```
+
+События run пишутся в append-only JSONL. Поля с именами `password`, `secret`, `token`, `api_key` и `authorization` маскируются.
+
+## CLI и индексация
 
 Прямой запуск проверки без web и Ouroboros:
 
 ```bash
-audit-insight audit --case cases/physical_currency_ovp --query "Проверить данные и сформировать выводы"
+audit-insight audit --data-dir data --query "Проверить данные и сформировать выводы"
 ```
 
 Доступные Ouroboros функции: `list_data_sources`, `profile_data_source`, `search_documents`, `run_rule`, `run_rule_group`, `build_findings`, `generate_report`, `run_full_audit`. Developer-функции изменения кода и веток находятся в `developer_tools.py` и не вызываются обычным web-аудитом.

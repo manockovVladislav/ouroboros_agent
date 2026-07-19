@@ -1,13 +1,12 @@
-import json
 import subprocess
 
 import pytest
 
 from audit_insight_agent import developer_tools
-from audit_insight_agent.developer_tools import _patch_paths, read_feedback
+from audit_insight_agent.developer_tools import _patch_paths
 
 
-def test_patch_allowlist_accepts_rules_and_rejects_evaluator():
+def test_patch_allowlist_accepts_rules_and_rejects_ground_truth():
     allowed = """diff --git a/rules/ovp/check.yaml b/rules/ovp/check.yaml
 --- a/rules/ovp/check.yaml
 +++ b/rules/ovp/check.yaml
@@ -17,9 +16,9 @@ def test_patch_allowlist_accepts_rules_and_rejects_evaluator():
 """
     assert _patch_paths(allowed) == {"rules/ovp/check.yaml"}
 
-    protected = """diff --git a/audit-evaluator/cases/x/truth.json b/audit-evaluator/cases/x/truth.json
---- a/audit-evaluator/cases/x/truth.json
-+++ b/audit-evaluator/cases/x/truth.json
+    protected = """diff --git a/ground_truth/truth.json b/ground_truth/truth.json
+--- a/ground_truth/truth.json
++++ b/ground_truth/truth.json
 @@ -1 +1 @@
 -{}
 +{"answer": 1}
@@ -28,31 +27,16 @@ def test_patch_allowlist_accepts_rules_and_rejects_evaluator():
         _patch_paths(protected)
 
 
-def test_read_feedback_accepts_only_sanitized_contract(tmp_path, monkeypatch):
-    monkeypatch.setenv("AUDIT_AGENT_OUTPUT_ROOT", str(tmp_path))
-    feedback_dir = tmp_path / "RUN-1" / "evaluation"
-    feedback_dir.mkdir(parents=True)
-    (feedback_dir / "feedback_for_ouroboros.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "1.0",
-                "run_id": "RUN-1",
-                "case_name": "case",
-                "summary": "Недостаточно общих сверок",
-                "weaknesses": ["Низкое покрытие связей"],
-                "recommendations": ["Расширить декларативные relationships"],
-                "aggregate_metrics": {"quality": 0.5},
-            }
-        ),
-        encoding="utf-8",
-    )
-    assert read_feedback("RUN-1")["summary"] == "Недостаточно общих сверок"
-
-    payload = json.loads((feedback_dir / "feedback_for_ouroboros.json").read_text())
-    payload["ground_truth"] = {"exact_answer": "secret"}
-    (feedback_dir / "feedback_for_ouroboros.json").write_text(json.dumps(payload))
-    with pytest.raises(ValueError):
-        read_feedback("RUN-1")
+def test_patch_allowlist_accepts_only_config_templates():
+    template = """--- a/configs/config.example.yaml
++++ b/configs/config.example.yaml
+"""
+    runtime = """--- a/configs/logging.yaml
++++ b/configs/logging.yaml
+"""
+    assert _patch_paths(template) == {"configs/config.example.yaml"}
+    with pytest.raises(PermissionError):
+        _patch_paths(runtime)
 
 
 def test_improvement_changes_stay_in_isolated_branch(tmp_path, monkeypatch):
@@ -80,19 +64,7 @@ new file mode 100644
 """
     developer_tools.apply_code_changes("RUN-DEV", patch)
     assert not (repository / "docs/improvement.md").exists()
-
-    feedback_dir = tmp_path / "outputs/RUN-EVAL/evaluation"
-    feedback_dir.mkdir(parents=True)
-    (feedback_dir / "feedback_for_ouroboros.json").write_text(
-        json.dumps(
-            {
-                "run_id": "RUN-EVAL",
-                "case_name": "case",
-                "summary": "quality improved",
-                "quality_improved": True,
-            }
-        ),
-        encoding="utf-8",
-    )
-    exported = developer_tools.create_patch("RUN-DEV", "RUN-EVAL")
-    assert "docs/improvement.md" in exported["patch"]
+    preview = developer_tools.preview_improvement("RUN-DEV")
+    assert preview["changed_paths"] == ["docs/improvement.md"]
+    assert preview["merged"] is False
+    assert (tmp_path / "outputs/RUN-DEV/development/improvement.patch").is_file()

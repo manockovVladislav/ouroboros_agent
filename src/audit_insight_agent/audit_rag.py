@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import resolve_source_location
+from .finding_builder import review_findings_and_build_plan
 from .document_loader import DOCUMENT_FORMATS, load_document_chunks
 from .models import (
     AgentRunResult,
@@ -19,6 +20,7 @@ from .models import (
 )
 from .report_generator import write_run_outputs
 from .retriever import BgeM3Embedder, QdrantRetriever, create_qdrant_client
+from .run_logging import RunEventLogger
 
 
 def _fingerprint(paths: list[Path], model: str, collection: str) -> str:
@@ -115,12 +117,21 @@ def ground_audit_with_documents(
 ) -> tuple[AgentRunResult, dict[str, Path]]:
     """Index configured documents, retrieve criteria and attach traceable references."""
 
-    source_config_path = package.root / "data_sources.yaml"
+    run_dir = Path(paths["candidate_findings"]).parent
+    event_log = RunEventLogger(run_dir, result.run_id)
+    source_config_path = package.source_config_path
     document_sources = _collect_document_sources(
         package, source_config_path, project_root
     )
     if not document_sources:
+        event_log.event("rag_skipped", reason="no_documents")
         return result, paths
+    event_log.event(
+        "rag_started",
+        documents=len(document_sources),
+        collection=settings.qdrant.collection,
+        model=settings.embedding.model,
+    )
 
     document_paths = [
         resolve_source_location(source, source_config_path)
@@ -148,6 +159,12 @@ def ground_audit_with_documents(
     manifest = _read_manifest(manifest_path)
     collection_exists = client.collection_exists(settings.qdrant.collection)
     index_required = not collection_exists or manifest.get("fingerprint") != fingerprint
+    event_log.event(
+        "rag_index_decision",
+        collection_exists=collection_exists,
+        index_required=index_required,
+        fingerprint=fingerprint,
+    )
 
     indexed_chunks = 0
     document_errors: list[str] = []
@@ -169,12 +186,21 @@ def ground_audit_with_documents(
                 document_errors.append(
                     f"{source.source_id}: {type(error).__name__}: {error}"
                 )
+                event_log.exception(
+                    "document_extraction_failed", error, source_id=source.source_id
+                )
         if not chunks:
             raise RuntimeError(
                 "Не удалось извлечь ни одного фрагмента документов: "
                 + "; ".join(document_errors)
             )
         indexed_chunks = retriever.index(chunks)
+        event_log.event(
+            "rag_index_updated",
+            documents=len(document_sources),
+            chunks=indexed_chunks,
+            collection=settings.qdrant.collection,
+        )
         _write_json_atomic(
             manifest_path,
             {
@@ -204,6 +230,13 @@ def ground_audit_with_documents(
             if part
         )[:4000]
         matches = retriever.search(search_query, limit=3)
+        event_log.event(
+            "rag_search_completed",
+            check_id=check_id,
+            query_length=len(search_query),
+            matches=len(matches),
+            top_scores=[match.score for match in matches],
+        )
         searches[check_id] = {
             "query": search_query,
             "matches": [match.model_dump(mode="json") for match in matches],
@@ -260,16 +293,21 @@ def ground_audit_with_documents(
         },
     }
     errors = [*result.execution_errors, *document_errors]
+    all_data_sources = [*result.data_sources, *document_descriptors]
+    finding_reviews, audit_plan = review_findings_and_build_plan(
+        grounded_findings, errors, all_data_sources
+    )
     grounded = result.model_copy(
         update={
             "findings": grounded_findings,
-            "data_sources": [*result.data_sources, *document_descriptors],
+            "data_sources": all_data_sources,
             "metrics": metrics,
             "execution_errors": errors,
+            "finding_reviews": finding_reviews,
+            "audit_plan": audit_plan,
             "status": RunStatus.COMPLETED_WITH_ERRORS if errors else result.status,
         }
     )
-    run_dir = Path(paths["candidate_findings"]).parent
     rag_context_path = run_dir / "rag_context.json"
     _write_json_atomic(
         rag_context_path,
@@ -283,4 +321,13 @@ def ground_audit_with_documents(
     )
     updated_paths = write_run_outputs(grounded, run_dir)
     updated_paths["rag_context"] = rag_context_path
+    event_log.event(
+        "rag_completed",
+        status=grounded.status.value,
+        documents=len(document_sources),
+        indexed_chunks=indexed_chunks,
+        grounded_rule_groups=len(searches),
+        document_errors=len(document_errors),
+        rag_context_path=str(rag_context_path),
+    )
     return grounded, updated_paths

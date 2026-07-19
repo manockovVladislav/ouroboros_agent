@@ -43,6 +43,13 @@ def render_markdown_report(
     result: AgentRunResult,
 ) -> str:
 
+    confirmed_count = sum(
+        item.verdict == "CONFIRMED" for item in result.finding_reviews
+    )
+    potential_count = sum(
+        item.status == "POTENTIAL_RISK" for item in result.audit_plan
+    )
+
     lines: list[str] = [
         "# Audit Insight Agent Report",
         "",
@@ -52,12 +59,12 @@ def render_markdown_report(
         f"- Started: `{result.started_at.isoformat()}`",
         f"- Completed: `{result.completed_at.isoformat()}`",
         f"- Data sources: `{len(result.data_sources)}`",
-        f"- Findings: `{len(result.findings)}`",
+        f"- Candidate findings: `{len(result.findings)}`",
+        f"- Confirmed findings: `{confirmed_count}`",
+        f"- Potential risks: `{potential_count}`",
         "",
     ]
 
-    if result.case_name:
-        lines.insert(3, f"- Case: `{result.case_name}`")
     if result.auditor_query:
         lines.extend(["## Auditor request", "", result.auditor_query, ""])
 
@@ -75,27 +82,47 @@ def render_markdown_report(
 
         lines.append("")
 
-    if not result.findings:
+    review_by_id = {item.finding_id: item for item in result.finding_reviews}
+    confirmed_findings = [
+        finding
+        for finding in result.findings
+        if review_by_id.get(finding.finding_id)
+        and review_by_id[finding.finding_id].verdict == "CONFIRMED"
+    ]
+
+    lines.extend(["## Evidence critique", ""])
+    if result.finding_reviews:
+        for review in result.finding_reviews:
+            lines.append(
+                f"- `{review.finding_id}` — **{review.verdict}**: {review.rationale}"
+            )
+            for limitation in review.limitations:
+                lines.append(f"  - Limitation: {limitation}")
+    else:
+        lines.append(
+            "Кандидатов для критики нет: выполненные правила не вернули строк-исключений."
+        )
+    lines.append("")
+
+    if not confirmed_findings:
 
         lines.extend([
             "## Result",
             "",
-            "Аудиторские наблюдения не сформированы.",
+            "Подтверждённые аудиторские выводы не сформированы.",
             "",
             "Это не означает отсутствие нарушений. "
-            "Это означает, что действующие проверки "
-            "не сформировали подтвержденных выводов.",
+            "Сигналы, не прошедшие критику доказательств, вынесены в план проверки.",
             "",
         ])
 
-        return "\n".join(lines)
+    if confirmed_findings:
+        lines.extend([
+            "## Confirmed findings",
+            "",
+        ])
 
-    lines.extend([
-        "## Findings",
-        "",
-    ])
-
-    for finding in result.findings:
+    for finding in confirmed_findings:
 
         lines.extend([
             (
@@ -158,6 +185,10 @@ def render_markdown_report(
                 f"{object_suffix}: "
                 f"{evidence.description}"
             )
+            metadata = evidence.fields.get("metadata") or {}
+            location = metadata.get("location") or metadata.get("relative_path")
+            if location:
+                lines.append(f"  - Location: `{location}`")
 
         if finding.facts:
             lines.extend([
@@ -183,6 +214,38 @@ def render_markdown_report(
             "---",
             "",
         ])
+
+    lines.extend(["## Prioritized audit plan", ""])
+    if result.audit_plan:
+        for item in result.audit_plan:
+            lines.extend(
+                [
+                    f"### {item.plan_id}: {item.title}",
+                    "",
+                    f"- Priority: `{item.priority.value}`",
+                    f"- Status: `{item.status}`",
+                    f"- Basis: {item.rationale}",
+                ]
+            )
+            if item.sources:
+                lines.append("- Sources: " + ", ".join(f"`{x}`" for x in item.sources))
+            for location in item.source_locations:
+                lines.append(f"- Document/location: `{location}`")
+            if item.next_steps:
+                lines.extend(["", "Next steps:", ""])
+                lines.extend(
+                    f"{index}. {step}"
+                    for index, step in enumerate(item.next_steps, start=1)
+                )
+            lines.extend(["", "---", ""])
+    else:
+        lines.extend(
+            [
+                "Доказательно обоснованных дополнительных направлений нет.",
+                "Это не доказывает отсутствие риска за пределами выполненных правил.",
+                "",
+            ]
+        )
 
     return "\n".join(lines)
 
@@ -243,6 +306,13 @@ def write_run_outputs(
         "findings_count": len(
             result.findings
         ),
+        "confirmed_findings_count": sum(
+            item.verdict == "CONFIRMED" for item in result.finding_reviews
+        ),
+        "potential_risks_count": sum(
+            item.status == "POTENTIAL_RISK" for item in result.audit_plan
+        ),
+        "audit_plan_items_count": len(result.audit_plan),
         "execution_errors_count": len(
             result.execution_errors
         ),
@@ -254,6 +324,18 @@ def write_run_outputs(
             "evidence": "evidence/",
         },
     }
+
+    for name, filename in (
+        ("events", "events.jsonl"),
+        ("rag_context", "rag_context.json"),
+        ("chat", "chat.json"),
+        ("discovered_sources", "discovered_sources.json"),
+        ("relationships", "relationships.json"),
+        ("selected_rules", "selected_rules.json"),
+        ("profiles", "profiles.json"),
+    ):
+        if (output_path / filename).is_file():
+            manifest["files"][name] = filename
 
     _write_text_atomic(
         manifest_path,
@@ -269,3 +351,24 @@ def write_run_outputs(
         "report": report_path,
         "run_manifest": manifest_path,
     }
+
+
+def refresh_run_manifest_files(run_dir: str | Path) -> Path:
+    """Refresh optional history artifacts after web/Ouroboros completion."""
+
+    root = Path(run_dir).expanduser().resolve()
+    manifest_path = root / "run_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files = manifest.setdefault("files", {})
+    for name, filename in (
+        ("events", "events.jsonl"),
+        ("rag_context", "rag_context.json"),
+        ("chat", "chat.json"),
+    ):
+        if (root / filename).is_file():
+            files[name] = filename
+    _write_text_atomic(
+        manifest_path,
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+    )
+    return manifest_path

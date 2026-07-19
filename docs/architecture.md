@@ -24,32 +24,30 @@ Evidence → AuditFinding → отчёт
 ## Универсальный ingestion/RAG
 
 ```text
-YAML registry
-   ├── table source → pandas reader → DuckDB → DataProfile
-   └── document source → text extraction → chunks → BGE-M3 → Qdrant
+data/ + knowledge/
+   ├── automatic table discovery → DuckDB → DataProfile
+   └── automatic document discovery → chunks → BGE-M3 → Qdrant
 ```
 
-Форматы, пути, ожидаемые поля, ключи и метаданные задаются конфигурацией.
-Специализированные пакеты проверок используют зарегистрированные таблицы и
-результаты поиска, но не меняют ingestion-ядро.
+Файловые источники не требуют YAML-реестра. `configs/data_sources.yaml` остаётся
+необязательным каталогом для SQL-реплик и явных метаданных.
 
-## Поток аудиторского case-пакета
+## Поток аудита
 
 ```text
 запрос аудитора
-  → выбор YAML-правил по описаниям и тегам
-  → загрузка только используемых источников в DuckDB
+  → обнаружение и профилирование всех таблиц
+  → отбор применимых YAML-правил из rules/
   → sql / reconciliation / timeline / anomaly
   → checksum-защищённые evidence JSON
   → объединение evidence по стабильному finding_id
   → candidate_findings.json + report.md
 ```
 
-`relationships.yaml` определяет источники и ключи сверок. Python-компиляторы
-работают только с общими понятиями source, key, value, timestamp и event; все
-предметные поля и формулы остаются в case-пакете.
+`группа rules/*/relationships.yaml` определяет ключи сверок. Python-ядро остаётся
+предметно-независимым; поля и формулы задаются в `rules/`.
 
-## Web, Ouroboros и evaluator
+## Web и Ouroboros
 
 ```text
 Gradio chat
@@ -58,12 +56,14 @@ Gradio chat
   → allowlisted ouroboros_tools в workspace Audit Insight
   → AuditInsightAgent
   → candidate_findings.json + report.md
-  → external audit-evaluator
-  → sanitized feedback_for_ouroboros.json
   → isolated improvement/<run_id> worktree
 ```
 
-Web и developer mode используют разные модули. Developer tools не входят в
-обычный web callback и не имеют операций merge или доступа к evaluator.
+Web и developer mode используют разные модули. Developer tools не имеют операций merge
+и не могут менять `data/`, `knowledge/`, secrets и production-конфиги.
 Web не запускает Ouroboros и Qdrant как дочерние процессы: их URL задаются в
 `configs/config.yaml`.
+
+Все ключевые этапы записываются в `outputs/runs/<run_id>/events.jsonl`. Общий
+ротируемый журнал находится в `logs/audit-insight.log`, а запрос и ответ
+web-чата — в `outputs/runs/<run_id>/chat.json`.

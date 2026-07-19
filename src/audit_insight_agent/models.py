@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -61,7 +62,7 @@ class SourceConfig(BaseModel):
 
     source_id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_.-]+$")
     source_type: Literal["table", "document"]
-    location: str = Field(min_length=1)
+    location: str = ""
     format: str = "auto"
     enabled: bool = True
     table_name: str | None = None
@@ -70,6 +71,25 @@ class SourceConfig(BaseModel):
     encoding: str = "utf-8"
     options: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    connection: str | None = Field(
+        default=None, pattern=r"^(?:\$selected|[A-Za-z0-9_.-]{1,80})$"
+    )
+    query: str | None = None
+
+    @model_validator(mode="after")
+    def database_source_is_complete(self) -> SourceConfig:
+        if self.format.casefold() in {"postgresql", "postgres", "greenplum"}:
+            if self.source_type != "table":
+                raise ValueError("Database sources must use source_type=table")
+            if not self.connection:
+                raise ValueError("Database source requires connection alias")
+            if not self.location and not self.query:
+                raise ValueError("Database source requires location or query")
+        elif self.connection or self.query:
+            raise ValueError("connection/query are allowed only for database sources")
+        elif not self.location:
+            raise ValueError("File/document source requires location")
+        return self
 
 
 class SourceCatalog(BaseModel):
@@ -119,6 +139,51 @@ class OuroborosSettings(BaseModel):
     timeout_seconds: int = Field(default=900, ge=10, le=86_400)
 
 
+class SelfImprovementSettings(BaseModel):
+    """Controlled post-audit improvement performed by Ouroboros."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    review_after_every_audit: bool = False
+    require_detected_gap: bool = True
+    allow_blocking_clarification: bool = True
+    max_changed_files: int = Field(default=20, ge=1, le=100)
+
+
+class DatabaseConnectionSettings(BaseModel):
+    """One allowlisted PostgreSQL-compatible read replica."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    engine: Literal["postgresql", "greenplum"] = "postgresql"
+    host: str = Field(min_length=1)
+    port: int = Field(default=5432, ge=1, le=65535)
+    database: str = Field(min_length=1)
+    user: str = Field(min_length=1)
+    password_env: str = Field(min_length=1)
+    sslmode: str = "prefer"
+    connect_timeout_seconds: int = Field(default=15, ge=1, le=120)
+
+
+class DatabaseSettings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    connections: dict[str, DatabaseConnectionSettings] = Field(default_factory=dict)
+    fetch_size: int = Field(default=10_000, ge=100, le=1_000_000)
+
+    @model_validator(mode="after")
+    def aliases_are_safe(self) -> DatabaseSettings:
+        invalid = [
+            alias
+            for alias in self.connections
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", alias)
+        ]
+        if invalid:
+            raise ValueError(f"Invalid database connection aliases: {invalid}")
+        return self
+
+
 class StorageSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -148,6 +213,10 @@ class ApplicationSettings(BaseModel):
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     qdrant: QdrantSettings = Field(default_factory=QdrantSettings)
     ouroboros: OuroborosSettings = Field(default_factory=OuroborosSettings)
+    self_improvement: SelfImprovementSettings = Field(
+        default_factory=SelfImprovementSettings
+    )
+    databases: DatabaseSettings = Field(default_factory=DatabaseSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     chunking: ChunkingSettings = Field(default_factory=ChunkingSettings)
     ingestion_output: str = "outputs/ingestion-result.json"
@@ -213,22 +282,6 @@ class IngestionResult(BaseModel):
     registered_tables: dict[str, str] = Field(default_factory=dict)
     profiles: list[DataProfile] = Field(default_factory=list)
     indexed_chunks: int = 0
-
-
-class FeedbackForOuroboros(BaseModel):
-    """Sanitized evaluator feedback; exact case answers are intentionally absent."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: str = "1.0"
-    run_id: str
-    case_name: str
-    summary: str
-    weaknesses: list[str] = Field(default_factory=list)
-    recommendations: list[str] = Field(default_factory=list)
-    aggregate_metrics: dict[str, float] = Field(default_factory=dict)
-    previous_run_id: str | None = None
-    quality_improved: bool | None = None
 
 
 class RelationshipKey(BaseModel):
@@ -415,7 +468,7 @@ class EvidenceReference(BaseModel):
 class CandidateFinding(BaseModel):
     """
     Структурированное аудиторское наблюдение.
-    Именно эти объекты проверяет evaluator.
+    Машиночитаемый аудиторский вывод.
     """
 
     model_config = ConfigDict(
@@ -474,6 +527,35 @@ class CandidateFinding(BaseModel):
         return self
 
 
+class FindingReview(BaseModel):
+    """Adversarial evidence check performed before presenting a finding."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    finding_id: str
+    verdict: Literal["CONFIRMED", "REQUIRES_VALIDATION", "REJECTED"]
+    rationale: str
+    evidence_checks: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    source_locations: list[str] = Field(default_factory=list)
+
+
+class AuditPlanItem(BaseModel):
+    """Ranked, evidence-bounded direction for audit work."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str
+    priority: Severity
+    status: Literal["CONFIRMED_ISSUE", "POTENTIAL_RISK", "BLOCKED_CHECK"]
+    title: str
+    rationale: str
+    finding_id: str | None = None
+    sources: list[str] = Field(default_factory=list)
+    source_locations: list[str] = Field(default_factory=list)
+    next_steps: list[str] = Field(default_factory=list)
+
+
 class AgentRunResult(BaseModel):
     """
     Полный результат одного запуска.
@@ -496,11 +578,12 @@ class AgentRunResult(BaseModel):
     data_root: str
     data_sources: list[DataSource]
 
-    case_name: str | None = None
     auditor_query: str | None = None
     rule_results: list[RuleResult] = Field(default_factory=list)
 
     findings: list[CandidateFinding]
+    finding_reviews: list[FindingReview] = Field(default_factory=list)
+    audit_plan: list[AuditPlanItem] = Field(default_factory=list)
 
     execution_errors: list[str] = Field(
         default_factory=list,

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from audit_insight_agent.ouroboros_tools import run_full_audit
+from audit_insight_agent.logging_config import configure_logging
 
 
 def _load_request(path_value: str) -> dict[str, str]:
@@ -26,19 +28,39 @@ def _load_request(path_value: str) -> dict[str, str]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("Audit request must be a JSON object")
-    case_name = str(raw.get("case_name") or "").strip()
     auditor_query = str(raw.get("auditor_query") or "").strip()
-    if not case_name or not auditor_query:
-        raise ValueError("case_name and auditor_query are required")
-    return {"case_name": case_name, "auditor_query": auditor_query}
+    replica_name = str(raw.get("replica_name") or "").strip()
+    input_mode = str(raw.get("input_mode") or "local_files").strip()
+    database_access = bool(raw.get("database_access", False))
+    if not auditor_query:
+        raise ValueError("auditor_query is required")
+    if input_mode == "local_files" and (database_access or replica_name):
+        raise ValueError("local_files mode cannot request database access")
+    if database_access and not replica_name:
+        raise ValueError("database_access requires an exact replica_name")
+    return {
+        "auditor_query": auditor_query,
+        "replica_name": replica_name,
+        "input_mode": input_mode,
+    }
 
 
 def main() -> None:
+    configure_logging(PROJECT_ROOT / "configs" / "logging.yaml")
     parser = argparse.ArgumentParser()
     parser.add_argument("--request", required=True)
     arguments = parser.parse_args()
     request = _load_request(arguments.request)
-    result = run_full_audit(request["case_name"], request["auditor_query"])
+    try:
+        result = run_full_audit(
+            request["auditor_query"],
+            replica_name=request["replica_name"] or None,
+        )
+    except Exception:
+        logging.getLogger("audit_insight.ouroboros_entrypoint").exception(
+            "Audit execution failed"
+        )
+        raise
     print("AUDIT_RESULT=" + json.dumps(result, ensure_ascii=False))
     print(f"AUDIT_RUN_ID={result['run_id']}")
 
