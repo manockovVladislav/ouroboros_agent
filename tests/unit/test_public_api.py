@@ -141,6 +141,21 @@ def test_activity_log_keeps_recent_steps_and_explains_the_work():
 def test_gradio_interface_builds_without_starting_server():
     interface = build_interface()
     assert interface.__class__.__name__ == "Blocks"
+    config = interface.get_config_file()
+    tab_labels = [
+        component.get("props", {}).get("label")
+        for component in config["components"]
+        if component.get("type") in {"tab", "tabitem"}
+    ]
+    mode_values = [
+        component.get("props", {}).get("value")
+        for component in config["components"]
+        if component.get("type") == "state"
+        and isinstance(component.get("props", {}).get("value"), bool)
+    ]
+
+    assert tab_labels == ["Аудитор — быстрый", "Аудитор + разработчик"]
+    assert sorted(mode_values) == [False, True]
 
 
 def test_web_orchestrator_uses_external_ouroboros_task_api(tmp_path):

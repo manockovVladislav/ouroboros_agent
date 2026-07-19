@@ -37,9 +37,9 @@ def build_interface():
     except ImportError as error:
         raise RuntimeError("Web UI requires the 'gradio' package") from error
 
-    orchestrator = AuditAgentSystem()
+    audit_system = AuditAgentSystem()
 
-    def respond(message, history, pending_request):
+    def respond(message, history, pending_request, developer_mode):
         message = (message or "").strip()
         history = list(history or [])
         pending_request = dict(pending_request or {})
@@ -56,16 +56,29 @@ def build_interface():
             original_request = message
             effective_request = message
         logger.info(
-            "Web audit requested query_length=%s",
+            "Web audit requested query_length=%s developer_mode=%s",
             len(effective_request),
+            bool(developer_mode),
         )
+        runner = audit_system if developer_mode else audit_system.audit
         activity = [
             "**Задача принята.** Формирую область аудита и передаю её "
             "агенту для проверки источников, расчётов и доказательств."
         ]
+        if developer_mode:
+            activity.append(
+                "**Включён полный режим.** После аудиторского заключения агент "
+                "проверит собственную логику и при необходимости подготовит "
+                "изолированное улучшение."
+            )
+        else:
+            activity.append(
+                "**Включён быстрый режим.** Результат будет возвращён сразу после "
+                "аудиторского анализа, без ожидания самоулучшения."
+            )
         yield history, _activity_log(activity), {}, None, "", {}, ""
         try:
-            for event in orchestrator.run_with_updates(effective_request):
+            for event in runner.run_with_updates(effective_request):
                 if event["kind"] == "status":
                     message_text = str(event["message"]).strip()
                     if message_text and (not activity or message_text != activity[-1]):
@@ -184,40 +197,60 @@ def build_interface():
         )
         gr.Markdown(
             "# Audit Insight Agent\n"
-            "Ouroboros управляет анализом, после каждого аудита проводит "
-            "review и может подготовить изолированное улучшение без merge."
+            "Выберите быстрый аудиторский анализ или полный цикл с контролируемым "
+            "самоулучшением. Результаты обоих режимов сохраняются одинаково."
         )
-        pending_request = gr.State({})
-        run_id = gr.Textbox(label="run_id", interactive=False)
-        chatbot_options = {"label": "Диалог", "height": 440}
-        if "type" in inspect.signature(gr.Chatbot).parameters:
-            chatbot_options["type"] = "messages"
-        chatbot = gr.Chatbot(**chatbot_options)
-        message = gr.Textbox(
-            label="Задача аудитора",
-            placeholder="Проанализируй данны в data/ и документы в knowledge/",
-            lines=3,
-        )
-        submit = gr.Button("Отправить", variant="primary")
-        status = gr.Markdown(
-            "## Ход работы\n\nАгент ожидает задачу.",
-            elem_classes=["activity-panel"],
-        )
-        findings = gr.JSON(
-            label="Подтверждённые выводы и ранжированный план"
-        )
-        report = gr.File(label="Отчёт report.md", interactive=False)
 
-        event_inputs = [message, chatbot, pending_request]
-        event_outputs = [
-            chatbot,
-            status,
-            findings,
-            report,
-            run_id,
-            pending_request,
-            message,
-        ]
-        submit.click(respond, inputs=event_inputs, outputs=event_outputs)
-        message.submit(respond, inputs=event_inputs, outputs=event_outputs)
+        def add_workspace(*, developer_mode: bool) -> None:
+            if developer_mode:
+                gr.Markdown(
+                    "Проводит аудит, затем ищет системные пробелы и может "
+                    "подготовить проверенное изменение в изолированной ветке. "
+                    "Этот режим работает дольше."
+                )
+            else:
+                gr.Markdown(
+                    "Отвечает на вопрос, анализирует данные и сразу возвращает "
+                    "аудиторское заключение. Самоулучшение не запускается."
+                )
+            pending_request = gr.State({})
+            mode = gr.State(developer_mode)
+            run_id = gr.Textbox(label="run_id", interactive=False)
+            chatbot_options = {"label": "Диалог", "height": 440}
+            if "type" in inspect.signature(gr.Chatbot).parameters:
+                chatbot_options["type"] = "messages"
+            chatbot = gr.Chatbot(**chatbot_options)
+            message = gr.Textbox(
+                label="Задача аудитора",
+                placeholder="Проанализируй данные в data/ и документы в knowledge/",
+                lines=3,
+            )
+            submit = gr.Button("Отправить", variant="primary")
+            status = gr.Markdown(
+                "## Ход работы\n\nАгент ожидает задачу.",
+                elem_classes=["activity-panel"],
+            )
+            findings = gr.JSON(
+                label="Подтверждённые выводы и ранжированный план"
+            )
+            report = gr.File(label="Отчёт report.md", interactive=False)
+
+            event_inputs = [message, chatbot, pending_request, mode]
+            event_outputs = [
+                chatbot,
+                status,
+                findings,
+                report,
+                run_id,
+                pending_request,
+                message,
+            ]
+            submit.click(respond, inputs=event_inputs, outputs=event_outputs)
+            message.submit(respond, inputs=event_inputs, outputs=event_outputs)
+
+        with gr.Tabs():
+            with gr.Tab("Аудитор — быстрый"):
+                add_workspace(developer_mode=False)
+            with gr.Tab("Аудитор + разработчик"):
+                add_workspace(developer_mode=True)
     return interface
