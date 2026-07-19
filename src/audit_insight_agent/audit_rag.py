@@ -294,8 +294,16 @@ def ground_audit_with_documents(
     }
     errors = [*result.execution_errors, *document_errors]
     all_data_sources = [*result.data_sources, *document_descriptors]
+    rule_applicability = {
+        item["rule_id"]: item
+        for item in result.metrics.get("rule_applicability", [])
+        if isinstance(item, dict) and item.get("rule_id")
+    }
     finding_reviews, audit_plan = review_findings_and_build_plan(
-        grounded_findings, errors, all_data_sources
+        grounded_findings,
+        errors,
+        all_data_sources,
+        rule_applicability,
     )
     grounded = result.model_copy(
         update={
@@ -319,7 +327,7 @@ def ground_audit_with_documents(
             "errors": document_errors,
         },
     )
-    updated_paths = write_run_outputs(grounded, run_dir)
+    updated_paths = {**paths, **write_run_outputs(grounded, run_dir)}
     updated_paths["rag_context"] = rag_context_path
     event_log.event(
         "rag_completed",

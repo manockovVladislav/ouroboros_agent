@@ -58,8 +58,8 @@ class AuditAgentSystem:
         yield {
             "kind": "status",
             "message": (
-                "Ouroboros проводит post-audit review: ищет "
-                "пробелы в логике, правилах, RAG и промптах…"
+                "**Проверяю качество выполненного аудита.** Агент ищет системные "
+                "пробелы, которые могли повлиять на полноту и надёжность выводов."
             ),
         }
         try:
@@ -67,7 +67,7 @@ class AuditAgentSystem:
                 if event["kind"] == "status":
                     yield {
                         "kind": "status",
-                        "message": f"Самоулучшение: {event['message']}",
+                        "message": str(event["message"]),
                     }
                     continue
                 has_changes = bool(event["result"].get("has_changes", True))
@@ -91,6 +91,9 @@ class AuditAgentSystem:
             }
             yield {
                 "kind": "status",
-                "message": "Аудит завершён, но improvement-patch отклонён.",
+                "message": (
+                    "**Основной аудит завершён.** Возможное улучшение агента "
+                    "не прошло проверку и было отклонено; это не меняет результаты аудита."
+                ),
             }
         yield {"kind": "result", "result": audit_result}

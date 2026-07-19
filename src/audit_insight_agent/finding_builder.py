@@ -143,6 +143,7 @@ def review_findings_and_build_plan(
     findings: list[CandidateFinding],
     execution_errors: list[str],
     data_sources: list[DataSource] | None = None,
+    rule_applicability: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[FindingReview], list[AuditPlanItem]]:
     """Challenge candidate findings and produce a ranked, source-specific plan."""
 
@@ -151,7 +152,9 @@ def review_findings_and_build_plan(
     locations_by_source = {
         item.source_id: item.relative_path for item in (data_sources or [])
     }
+    applicability_by_rule = rule_applicability or {}
     for finding in findings:
+        applicability = applicability_by_rule.get(finding.check_id, {})
         table_evidence = [
             item
             for item in finding.evidence
@@ -194,17 +197,22 @@ def review_findings_and_build_plan(
             limitations.append(
                 "Уровень уверенности ниже порога 0.75; сигнал требует проверки."
             )
+        if applicability.get("status") == "PARTIAL":
+            limitations.append(
+                "Словарь правила покрывает не все фактические значения; семантическая "
+                "применимость вывода требует проверки."
+            )
         if not table_evidence:
             verdict = "REJECTED"
             rationale = (
                 "Вывод не прошёл критику: нет воспроизводимой строки результата "
                 "с checksum и SQL-запросом."
             )
-        elif finding.confidence < 0.75:
+        elif finding.confidence < 0.75 or applicability.get("status") == "PARTIAL":
             verdict = "REQUIRES_VALIDATION"
             rationale = (
-                "Воспроизводимый сигнал есть, но его нельзя выдавать за подтверждённое "
-                "нарушение без дополнительной проверки."
+                "Воспроизводимый сигнал есть, но уверенность или покрытие словаря недостаточны, "
+                "чтобы выдать его за подтверждённое нарушение."
             )
         else:
             verdict = "CONFIRMED"
@@ -221,6 +229,12 @@ def review_findings_and_build_plan(
                     f"Воспроизводимых табличных evidence: {len(table_evidence)}",
                     f"Всего ссылок на evidence: {len(finding.evidence)}",
                     f"Confidence: {finding.confidence:.2f}",
+                    (
+                        "Rule vocabulary row coverage: "
+                        f"{float(applicability['row_coverage']):.1%}"
+                        if "row_coverage" in applicability
+                        else "Rule vocabulary: not applicable to this rule kind"
+                    ),
                 ],
                 limitations=limitations,
                 source_locations=source_locations,

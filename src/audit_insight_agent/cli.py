@@ -9,9 +9,11 @@ from pathlib import Path
 from .agent import AuditInsightAgent
 from .config import load_application_settings, load_source_catalog
 from .data_loader import DuckDBTableStore
+from .developer_orchestrator import OuroborosDeveloperOrchestrator
 from .ingestion import ingest_catalog
 from .logging_config import configure_logging
 from .models import ApplicationSettings
+from .ouroboros_tools import _output_root
 from .retriever import BgeM3Embedder, QdrantRetriever, create_qdrant_client
 
 
@@ -60,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
     agent.add_argument("--output-root", default="outputs/runs")
     agent.add_argument("--run-id")
     agent.add_argument("--agent-version", default="0.3.0")
+
+    improve = commands.add_parser(
+        "improve-from-feedback",
+        help="Review sanitized audit-evaluator feedback in an isolated worktree",
+    )
+    improve.add_argument("--run-id", required=True)
+    improve.add_argument("--settings", default="configs/config.yaml")
     return parser
 
 
@@ -186,6 +195,30 @@ def _run_audit(arguments: argparse.Namespace) -> None:
     )
 
 
+def _run_improve_from_feedback(arguments: argparse.Namespace) -> None:
+    settings = load_application_settings(arguments.settings)
+    orchestrator = OuroborosDeveloperOrchestrator(settings=settings)
+    final_result: dict | None = None
+    for event in orchestrator.run_from_evaluator_feedback(arguments.run_id):
+        print(json.dumps(event, ensure_ascii=False))
+        if event.get("kind") == "result":
+            final_result = event.get("result")
+    if final_result is None:
+        raise RuntimeError("Ouroboros не вернул результат improvement")
+
+    output = (
+        _output_root()
+        / arguments.run_id
+        / "evaluation"
+        / "improvement.json"
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(final_result, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[2]
     logging_path = Path(
@@ -199,6 +232,8 @@ def main() -> None:
         _run_search(arguments)
     elif arguments.command == "audit":
         _run_audit(arguments)
+    elif arguments.command == "improve-from-feedback":
+        _run_improve_from_feedback(arguments)
     else:
         _run_agent(arguments)
 

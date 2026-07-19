@@ -10,6 +10,27 @@ from .agent_system import AuditAgentSystem
 logger = logging.getLogger("audit_insight.web")
 
 
+def _activity_log(messages: list[str]) -> str:
+    """Render a readable, cumulative view of the latest agent actions."""
+
+    visible = messages[-12:]
+    steps = [f"{index}. {message}" for index, message in enumerate(visible, 1)]
+    return "## Ход работы\n\n" + "\n\n".join(steps)
+
+
+def _file_count(value: int) -> str:
+    remainder = value % 100
+    if 11 <= remainder <= 14:
+        form = "файлов"
+    elif value % 10 == 1:
+        form = "файл"
+    elif 2 <= value % 10 <= 4:
+        form = "файла"
+    else:
+        form = "файлов"
+    return f"{value} {form}"
+
+
 def build_interface():
     try:
         import gradio as gr
@@ -38,11 +59,18 @@ def build_interface():
             "Web audit requested query_length=%s",
             len(effective_request),
         )
-        yield history, "Передача задачи в Ouroboros…", {}, None, "", {}, ""
+        activity = [
+            "**Задача принята.** Формирую область аудита и передаю её "
+            "агенту для проверки источников, расчётов и доказательств."
+        ]
+        yield history, _activity_log(activity), {}, None, "", {}, ""
         try:
             for event in orchestrator.run_with_updates(effective_request):
                 if event["kind"] == "status":
-                    yield history, event["message"], {}, None, "", {}, ""
+                    message_text = str(event["message"]).strip()
+                    if message_text and (not activity or message_text != activity[-1]):
+                        activity.append(message_text)
+                    yield history, _activity_log(activity), {}, None, "", {}, ""
                     continue
                 if event["kind"] == "clarification":
                     history.append(
@@ -53,7 +81,13 @@ def build_interface():
                     }
                     yield (
                         history,
-                        "Нужно одно уточнение до начала расчётов.",
+                        _activity_log(
+                            activity
+                            + [
+                                "**Анализ приостановлен.** Без одного уточнения "
+                                "расчёты могут привести к недостоверному выводу."
+                            ]
+                        ),
                         {},
                         None,
                         "",
@@ -67,22 +101,23 @@ def build_interface():
                 if improvement.get("status") == "PATCH_READY":
                     changed_paths = improvement.get("changed_paths") or []
                     answer += (
-                        "\n\nOuroboros подготовил изолированное улучшение: "
-                        f"{len(changed_paths)} файлов. Тесты прошли; изменения не "
-                        "влиты в рабочую ветку.\n"
-                        f"Ветка: `{improvement.get('branch')}`\n"
-                        f"Patch: `{improvement.get('patch_path')}`\n"
-                        f"Файлы: {', '.join(f'`{path}`' for path in changed_paths)}"
+                        "\n\n## Улучшение агента\n\n"
+                        "После аудита система нашла обоснованную возможность "
+                        f"улучшения и подготовила изменения, затрагивающие {_file_count(len(changed_paths))}. "
+                        "Они прошли тесты и остались изолированными, "
+                        "поэтому не влияют на рабочую версию до ручного решения."
                     )
                 elif improvement.get("status") == "NO_CHANGES":
                     answer += (
-                        "\n\nOuroboros выполнил post-audit review: "
-                        "обоснованных изменений проекта не требуется."
+                        "\n\n## Качество анализа\n\n"
+                        "После завершения аудита система повторно проверила логику "
+                        "анализа и не нашла обоснованных изменений."
                     )
                 elif improvement.get("status") == "TESTS_FAILED":
                     answer += (
-                        "\n\nOuroboros подготовил правки, но они не прошли "
-                        "тесты и не готовы к ручному применению."
+                        "\n\n## Качество анализа\n\n"
+                        "Система нашла возможность улучшения, но подготовленные изменения "
+                        "не прошли проверку качества. Они отклонены и не влияют на рабочую версию."
                     )
                 history.append({"role": "assistant", "content": answer})
                 confirmed_ids = {
@@ -100,10 +135,10 @@ def build_interface():
                     "prioritized_audit_plan": result.get("audit_plan", []),
                 }
                 status = (
-                    f"Статус: **{result['status']}** · "
-                    f"подтверждено: **{len(confirmed_findings)}** · "
-                    f"run_id: `{result['run_id']}` · "
-                    f"self-improvement: **{improvement.get('status', 'DISABLED')}**"
+                    _activity_log(activity)
+                    + "\n\n**Работа завершена.** "
+                    + f"Количество подтверждённых выводов — {len(confirmed_findings)}. "
+                    + "Агент также сформировал план дальнейшей проверки и сохранил отчёт."
                 )
                 yield (
                     history,
@@ -119,12 +154,34 @@ def build_interface():
             history.append(
                 {
                     "role": "assistant",
-                    "content": f"Запуск завершился ошибкой: {type(error).__name__}: {error}",
+                    "content": (
+                        "Анализ не удалось завершить, поэтому аудиторские выводы "
+                        "не сформированы. Причина: "
+                        f"{error}"
+                    ),
                 }
             )
-            yield history, "Статус: **ERROR**", {}, None, "", {}, ""
+            yield (
+                history,
+                _activity_log(
+                    activity
+                    + [
+                        "**Анализ остановлен.** Результат не сформирован; "
+                        "подробности причины показаны в диалоге."
+                    ]
+                ),
+                {},
+                None,
+                "",
+                {},
+                "",
+            )
 
     with gr.Blocks(title="Audit Insight Agent") as interface:
+        gr.HTML(
+            "<style>.activity-panel {min-height: 220px; max-height: 420px; "
+            "overflow-y: auto;}</style>"
+        )
         gr.Markdown(
             "# Audit Insight Agent\n"
             "Ouroboros управляет анализом, после каждого аудита проводит "
@@ -142,7 +199,10 @@ def build_interface():
             lines=3,
         )
         submit = gr.Button("Отправить", variant="primary")
-        status = gr.Markdown("Статус: ожидание запроса")
+        status = gr.Markdown(
+            "## Ход работы\n\nАгент ожидает задачу.",
+            elem_classes=["activity-panel"],
+        )
         findings = gr.JSON(
             label="Подтверждённые выводы и ранжированный план"
         )

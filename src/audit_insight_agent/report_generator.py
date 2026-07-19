@@ -333,6 +333,7 @@ def write_run_outputs(
         ("relationships", "relationships.json"),
         ("selected_rules", "selected_rules.json"),
         ("profiles", "profiles.json"),
+        ("data_dependencies", "data_dependencies.json"),
     ):
         if (output_path / filename).is_file():
             manifest["files"][name] = filename

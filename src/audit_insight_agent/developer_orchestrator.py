@@ -15,6 +15,10 @@ from .developer_tools import (
     preview_improvement,
     run_tests,
 )
+from .evaluator_feedback import (
+    build_evaluator_review_task,
+    load_evaluator_feedback,
+)
 from .models import ApplicationSettings
 from .ouroboros import OuroborosConnectionError, OuroborosHTTPClient
 from .ouroboros_tools import PROJECT_ROOT, _output_root, _validate_run_id
@@ -52,7 +56,13 @@ class OuroborosDeveloperOrchestrator:
 
         run_dir = _output_root() / validated
         event_log = RunEventLogger(run_dir, validated)
-        yield {"kind": "status", "message": "Создание изолированного worktree…"}
+        yield {
+            "kind": "status",
+            "message": (
+                "**Готовлю безопасную среду для самопроверки.** Возможные улучшения "
+                "будут изолированы от рабочей версии."
+            ),
+        }
         worktree = create_improvement_branch(validated)
         event_log.event(
             "developer_worktree_ready",
@@ -62,7 +72,13 @@ class OuroborosDeveloperOrchestrator:
             status=worktree["status"],
         )
 
-        yield {"kind": "status", "message": "Проверка Ouroboros server…"}
+        yield {
+            "kind": "status",
+            "message": (
+                "**Запускаю самопроверку.** Агент сопоставит результаты аудита "
+                "с логикой самой системы."
+            ),
+        }
         self.client.health()
         prompt = self._task_prompt(
             user_request=user_request,
@@ -94,7 +110,16 @@ class OuroborosDeveloperOrchestrator:
                 )
                 yield {
                     "kind": "status",
-                    "message": f"Developer task: **{status}** (`{task_id}`)",
+                    "message": (
+                        "**Самопроверка выполняется.** Агент оценивает, нужны ли "
+                        "обоснованные общие улучшения."
+                        if status == "running"
+                        else (
+                            "**Самопроверка завершена.** Проверяю её результат перед выводом пользователю."
+                            if status == "completed"
+                            else "**Самопроверка ожидает запуска.** Контекст подготовлен; анализ начнётся после выделения ресурсов."
+                        )
+                    ),
                 }
                 previous_status = status
             if status in self.TERMINAL_STATUSES:
@@ -137,7 +162,10 @@ class OuroborosDeveloperOrchestrator:
                 if has_changes:
                     yield {
                         "kind": "status",
-                        "message": "Запуск тестов для improvement-patch…",
+                        "message": (
+                            "**Проверяю предложенное улучшение.** Запускаю тесты, чтобы "
+                            "убедиться, что изменение не нарушает текущую работу системы."
+                        ),
                     }
                     test_result = run_tests(validated)
                     tests_path = development_dir / "tests.json"
@@ -184,7 +212,7 @@ class OuroborosDeveloperOrchestrator:
         run_id = str(audit_result.get("run_id") or "")
         findings = [
             {
-                "rule_id": item.get("rule_id"),
+                "rule_id": item.get("check_id") or item.get("rule_id"),
                 "severity": item.get("severity"),
                 "title": item.get("title"),
             }
@@ -197,6 +225,9 @@ class OuroborosDeveloperOrchestrator:
             "improvement_reason": audit_result.get("improvement_reason"),
             "execution_errors": list(audit_result.get("execution_errors") or [])[:20],
             "findings": findings,
+            "data_dependencies_path": audit_result.get("data_dependencies_path"),
+            "selected_rules_path": audit_result.get("selected_rules_path"),
+            "profiles_path": audit_result.get("profiles_path"),
         }
         task = f"""Проведи обязательный post-audit review Audit Insight Agent.
 Контекст аудита:
@@ -205,12 +236,29 @@ class OuroborosDeveloperOrchestrator:
 Изучи код и артефакты цикла. Отдели нарушения в данных от недостатков
 самого агента: нехватающей общей функции, слабого правила, ошибки RAG,
 неточного промпта, неполной evidence-цепочки или непокрытого тестами сценария.
+Обязательно сопоставь находки с rule_id/check_id, конфигурацией правила, кодом его исполнения и data_dependencies.json. Не делай вывод о дефекте данных или кода только по массовости срабатываний.
 Если нашёл обоснованный системный пробел — внеси минимальное универсальное
 изменение в код, правила, RAG или промпты и обязательно добавь или обнови тест.
 Если пробела нет, не создавай фиктивные правки: оставь worktree без изменений и объясни,
 что было проверено.
 Не зашивай имена файлов, валют, портфелей или ожидаемый ответ текущего кейса."""
         yield from self.run_with_updates(task, run_id)
+
+    def run_from_evaluator_feedback(
+        self, run_id: str
+    ) -> Iterator[dict[str, Any]]:
+        """Review sanitized private-evaluator feedback for an existing run."""
+
+        if not self.settings.self_improvement.enabled:
+            raise RuntimeError(
+                "self_improvement.enabled должен быть true"
+            )
+        feedback = load_evaluator_feedback(run_id)
+        task = build_evaluator_review_task(feedback)
+        yield from self.run_with_updates(
+            task,
+            feedback["source_run_id"],
+        )
 
     def _task_prompt(
         self,

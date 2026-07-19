@@ -287,7 +287,13 @@ def _run_payload(result: AgentRunResult, paths: dict[str, Path]) -> dict[str, An
         "report_path": str(paths["report"]),
         "run_manifest_path": str(paths["run_manifest"]),
     }
-    for name in ("discovered_sources", "profiles", "relationships", "selected_rules"):
+    for name in (
+        "discovered_sources",
+        "profiles",
+        "relationships",
+        "selected_rules",
+        "data_dependencies",
+    ):
         if name in paths:
             payload[f"{name}_path"] = str(paths[name])
     if "rag_context" in paths:

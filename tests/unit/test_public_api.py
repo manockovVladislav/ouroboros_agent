@@ -15,6 +15,7 @@ from audit_insight_agent.ouroboros_tools import (
     run_rule,
 )
 from audit_insight_agent.web import build_interface
+from audit_insight_agent.web import _activity_log
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -57,7 +58,40 @@ def test_web_answer_summary():
             "execution_errors": [],
         }
     )
-    assert "HIGH: 1" in answer
+    assert "## Главный вывод" in answer
+    assert "внимания требует" in answer
+    assert "COMPLETED" not in answer
+
+    many = OuroborosOrchestrator._answer(
+        {
+            "status": "COMPLETED",
+            "findings": [
+                {"severity": "MEDIUM", "title": f"Finding {index}"}
+                for index in range(30)
+            ],
+            "execution_errors": [],
+        }
+    )
+    assert "30 нарушений" in many
+
+    authored = OuroborosOrchestrator._answer(
+        {
+            "status": "COMPLETED",
+            "findings": [],
+            "ouroboros_answer": "Главный вывод. Проверка завершена.",
+        }
+    )
+    assert authored == "Главный вывод. Проверка завершена."
+
+
+def test_activity_log_keeps_recent_steps_and_explains_the_work():
+    messages = [f"Шаг {index}" for index in range(15)]
+    rendered = _activity_log(messages)
+
+    assert rendered.startswith("## Ход работы")
+    assert "Шаг 0" not in rendered
+    assert "Шаг 3" in rendered
+    assert "Шаг 14" in rendered
 
 
 def test_gradio_interface_builds_without_starting_server():

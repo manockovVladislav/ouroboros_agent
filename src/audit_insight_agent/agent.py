@@ -9,6 +9,7 @@ from pathlib import Path
 from .config import resolve_source_location
 from .data_loader import DuckDBTableStore, infer_table_format, is_database_source
 from .data_profiler import profile_table
+from .dependency_analyzer import analyze_data_dependencies
 from .evidence_store import EvidenceStore
 from .finding_builder import deduplicate_findings, review_findings_and_build_plan
 from .models import (
@@ -185,6 +186,16 @@ class AuditInsightAgent:
                 f"{rule_id}: required source could not be loaded"
                 for rule_id in unavailable_rules
             )
+            dependency_analysis = analyze_data_dependencies(
+                table_store,
+                table_names,
+                profiles,
+                runnable_rules,
+            )
+            rule_applicability = {
+                item["rule_id"]: item
+                for item in dependency_analysis["rule_applicability"]
+            }
             runtime = AuditRuntimeContext(
                 run_id=actual_run_id,
                 table_store=table_store,
@@ -194,6 +205,7 @@ class AuditInsightAgent:
                     item.relationship_id: item
                     for item in workspace.relationships.relationships
                 },
+                rule_applicability=rule_applicability,
             )
             findings, rule_results = execute_rules(runtime, runnable_rules)
 
@@ -211,7 +223,10 @@ class AuditInsightAgent:
             ],
         ]
         finding_reviews, audit_plan = review_findings_and_build_plan(
-            findings, errors, source_descriptors
+            findings,
+            errors,
+            source_descriptors,
+            rule_applicability,
         )
         completed_at = datetime.now(timezone.utc)
         result = AgentRunResult(
@@ -238,6 +253,7 @@ class AuditInsightAgent:
                 "skipped_rules": workspace.skipped_rules,
                 "findings_count": len(findings),
                 "evidence_count": sum(len(item.evidence_ids) for item in rule_results),
+                "rule_applicability": dependency_analysis["rule_applicability"],
                 "duration_seconds": (completed_at - started_at).total_seconds(),
             },
         )
@@ -260,6 +276,10 @@ class AuditInsightAgent:
         paths["profiles"] = _write_json(
             run_output_dir / "profiles.json",
             [profile.model_dump(mode="json") for profile in profiles],
+        )
+        paths["data_dependencies"] = _write_json(
+            run_output_dir / "data_dependencies.json",
+            dependency_analysis,
         )
         refresh_run_manifest_files(run_output_dir)
         event_log.event(

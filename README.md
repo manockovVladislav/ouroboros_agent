@@ -218,6 +218,22 @@ python scripts/run_web.py
 переключать ветку не нужно.
 Подробнее: [docs/developer_mode.md](docs/developer_mode.md).
 
+### Feedback закрытого evaluator
+
+`audit-evaluator` публикует только санитизированную обратную связь в:
+
+```text
+outputs/runs/<run_id>/evaluation/feedback.json
+```
+
+Ground truth, закрытые ID и бизнес-логика evaluator в Ouroboros не передаются. После оценки можно запустить контролируемый review:
+
+```bash
+audit-insight improve-from-feedback --run-id <run_id>
+```
+
+Ouroboros проверяет контракт feedback, сопоставляет его с артефактами run и создаёт только reviewable patch в isolated worktree. Результат review сохраняется в `evaluation/improvement.json`; commit и merge не выполняются.
+
 ## Логи и история
 
 Общий журнал web, CLI, Ouroboros-шлюза и аудиторского ядра:

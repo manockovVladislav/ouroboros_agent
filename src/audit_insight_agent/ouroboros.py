@@ -28,6 +28,19 @@ from .ouroboros_tools import (
 )
 
 
+def _counted(value: int, one: str, few: str, many: str) -> str:
+    remainder = value % 100
+    if 11 <= remainder <= 14:
+        form = many
+    elif value % 10 == 1:
+        form = one
+    elif 2 <= value % 10 <= 4:
+        form = few
+    else:
+        form = many
+    return f"{value} {form}"
+
+
 class OuroborosConnectionError(RuntimeError):
     """Raised when the external Ouroboros gateway cannot serve a task."""
 
@@ -170,7 +183,13 @@ class OuroborosOrchestrator:
         return result
 
     def run_with_updates(self, user_request: str) -> Iterator[dict[str, Any]]:
-        yield {"kind": "status", "message": "Проверка соединения с Ouroboros…"}
+        yield {
+            "kind": "status",
+            "message": (
+                "**Проверяю готовность агента.** Убеждаюсь, что сервис "
+                "доступен и может принять задачу без потери контекста."
+            ),
+        }
         self.logger.info("Checking Ouroboros health at %s", self.settings.ouroboros.url)
         self.client.health()
         request_path = self._write_task_request(user_request)
@@ -214,7 +233,10 @@ class OuroborosOrchestrator:
 
         yield {
             "kind": "status",
-            "message": f"Ouroboros выполняет задачу `{task_id}`…",
+            "message": (
+                "**Анализ запущен.** Агент определяет доступные источники, "
+                "выполняет правила аудита и собирает доказательства для каждого вывода."
+            ),
         }
         deadline = time.monotonic() + self.settings.ouroboros.timeout_seconds
         previous_status = ""
@@ -237,7 +259,7 @@ class OuroborosOrchestrator:
                 )
                 yield {
                     "kind": "status",
-                    "message": f"Ouroboros: **{status}** (`{task_id}`)",
+                    "message": self._status_message(status),
                 }
                 previous_status = status
             event_reader = getattr(self.client, "get_task_events", None)
@@ -474,11 +496,10 @@ AUDIT_CLARIFICATION_REQUIRED. Не спрашивай о реплике, source_
 
 Не выбирай одну систему вместо других. Сразу выполни команду в workspace точно с таким argv:
 {json.dumps(command, ensure_ascii=False)}
-Команда запустит табличные правила, RAG по документам и создаст evidence, candidate_findings.json и report.md.
-После запуска прочитай только созданные report.md и candidate_findings.json.
-Дай краткий аудиторский вывод только после раздела Evidence critique. Не выдавай POTENTIAL_RISK за
-найденное нарушение. Для каждого CONFIRMED укажи, что найдено, в какой таблице/документе и какой
-факт это подтверждает. Затем кратко изложи ранжированный Prioritized audit plan. Опирайся только на эти артефакты.
+Команда запустит табличные правила, RAG по документам, профилирование и поиск зависимостей в данных. Она создаст evidence, candidate_findings.json, report.md, profiles.json, relationships.json, selected_rules.json и data_dependencies.json.
+После запуска изучи report.md, candidate_findings.json, profiles.json, relationships.json, selected_rules.json и data_dependencies.json. Для существенных или противоречивых сигналов прочитай также конфигурацию сработавшего правила и релевантный код его исполнения. Это разрешённое read-only исследование, а не изменение кода.
+Перед тем как назвать сигнал нарушением, проверь: (1) покрывает ли словарь правила фактические значения; (2) подтверждены ли связи между источниками; (3) не спутана ли техническая воспроизводимость с семантической достоверностью. Никогда не объявляй нарушение CONFIRMED, если rule_applicability имеет статус PARTIAL или INCOMPATIBLE.
+После раздела Evidence critique напиши итог на русском языке по принципу пирамиды Минто, как в хорошем консалтинговом меморандуме. Начни с одного главного вывода и его значения для пользователя. Затем дай непересекающиеся обоснования в порядке важности и заверши конкретными действиями. Пиши связным текстом, понятным руководителю без технического контекста: не выводи служебные статусы, run_id, имена внутренних инструментов или пути к файлам. Не выдавай POTENTIAL_RISK за найденное нарушение. Для каждого CONFIRMED сообщи, что найдено, где и какой факт это подтверждает. Изложи ранжированный Prioritized audit plan как план действий, опираясь только на созданные артефакты.
 Отдельно оцени, не помешал ли
 системный пробел в общем коде, правилах, RAG или промптах. Не считай пробелом отсутствие нарушений или
 нехватку данных. Если общая возможность реального аудита отсутствовала, добавь строку:
@@ -524,12 +545,25 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
         if event_type == "tool_call":
             tool = str(data.get("tool") or data.get("name") or "").strip()
             labels = {
-                "run_shell": "Запускаю аудиторские расчёты…",
-                "read_file": "Изучаю структуру данных и документы…",
-                "list_files": "Определяю доступные источники…",
+                "run_shell": (
+                    "**Выполняю аудиторские расчёты.** Проверяю данные по заданным "
+                    "правилам и сохраняю воспроизводимые результаты."
+                ),
+                "read_file": (
+                    "**Изучаю источники.** Сопоставляю структуру данных и содержание "
+                    "документов, чтобы привязать выводы к конкретным фактам."
+                ),
+                "list_files": (
+                    "**Определяю область проверки.** Составляю перечень доступных "
+                    "таблиц и документов, чтобы не пропустить существенный источник."
+                ),
             }
             if tool:
-                return labels.get(tool, f"Ouroboros выполняет: `{tool}`…")
+                return labels.get(
+                    tool,
+                    "**Выполняю следующий шаг анализа.** Агент обрабатывает "
+                    "полученные данные и готовит основание для итогового вывода.",
+                )
         if event_type in {"progress", "message"}:
             value = next(
                 (
@@ -543,6 +577,28 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
             if value and len(value) <= 240:
                 return value
         return ""
+
+    @staticmethod
+    def _status_message(status: str) -> str:
+        messages = {
+            "pending": (
+                "**Задача поставлена в очередь.** Агент получил контекст и начнёт "
+                "анализ, как только освободятся ресурсы."
+            ),
+            "running": (
+                "**Агент работает над задачей.** Сейчас он собирает и проверяет "
+                "доказательства; итоговые выводы ещё не сформированы."
+            ),
+            "completed": (
+                "**Основной анализ завершён.** Агент переходит к сборке итога, "
+                "отделяя подтверждённые нарушения от направлений, которые требуют дополнительной проверки."
+            ),
+        }
+        return messages.get(
+            status,
+            "**Состояние задачи изменилось.** Агент продолжает работу; "
+            "новые результаты появятся в этой ленте по мере готовности.",
+        )
 
     @classmethod
     def _extract_run_id(cls, task_result: Any) -> str:
@@ -577,7 +633,13 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
         rag_context = run_dir / "rag_context.json"
         if rag_context.is_file():
             paths["rag_context"] = rag_context
-        for name in ("discovered_sources", "profiles", "relationships", "selected_rules"):
+        for name in (
+            "discovered_sources",
+            "profiles",
+            "relationships",
+            "selected_rules",
+            "data_dependencies",
+        ):
             artifact = run_dir / f"{name}.json"
             if artifact.is_file():
                 paths[name] = artifact
@@ -585,6 +647,9 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
 
     @staticmethod
     def _answer(result: dict[str, Any]) -> str:
+        narrative = str(result.get("ouroboros_answer") or "").strip()
+        if narrative:
+            return narrative
         findings = result.get("findings", [])
         reviews = result.get("finding_reviews", [])
         confirmed_ids = {
@@ -598,29 +663,73 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
             else findings
         )
         severity_counts = Counter(item.get("severity", "UNKNOWN") for item in confirmed)
-        severity_text = ", ".join(
-            f"{severity}: {count}"
-            for severity, count in sorted(severity_counts.items())
-        ) or "нет"
-        titles = [item.get("title", "Без названия") for item in confirmed[:5]]
-        lines = []
-        if result.get("ouroboros_answer"):
-            lines.extend([str(result["ouroboros_answer"]), "---"])
-        lines.extend([
-            f"Анализ завершён со статусом {result['status']}.",
-            f"Подтверждённых выводов: {len(confirmed)}; по критичности: {severity_text}.",
-        ])
-        if titles:
-            lines.append("Подтверждёно: " + "; ".join(titles) + ".")
+        high_count = severity_counts.get("CRITICAL", 0) + severity_counts.get("HIGH", 0)
+        lines = ["## Главный вывод"]
+        if confirmed:
+            priority = confirmed[0].get("title", "первое по приоритету нарушение")
+            if len(confirmed) == 1:
+                conclusion = "Аудит подтвердил одно нарушение."
+            else:
+                finding_count = _counted(
+                    len(confirmed), "нарушение", "нарушения", "нарушений"
+                )
+                conclusion = f"Аудит подтвердил {finding_count}."
+            if high_count == 1:
+                urgency = (
+                    " Оно имеет высокую или критическую значимость."
+                    if len(confirmed) == 1
+                    else " Одно из них имеет высокую или критическую значимость."
+                )
+            elif high_count:
+                urgency = f" {high_count} из них имеют высокую или критическую значимость."
+            else:
+                urgency = ""
+            lines.append(
+                f"{conclusion}{urgency} Первоочередного внимания требует «{priority}»."
+            )
+        else:
+            lines.append(
+                "Аудит не выявил нарушений, для которых собраны достаточные "
+                "доказательства. Это снижает текущую оценку риска, но не доказывает полное отсутствие нарушений."
+            )
+        if confirmed:
+            lines.append("## Обоснование")
+            for index, finding in enumerate(confirmed[:5], 1):
+                title = finding.get("title", "Без названия")
+                summary = str(finding.get("summary") or "").strip()
+                risk = str(finding.get("risk") or "").strip()
+                paragraph = f"{index}. **{title}.** {summary}"
+                if risk:
+                    paragraph += f" Это создаёт риск: {risk}"
+                lines.append(paragraph)
         potential_count = sum(
             item.get("status") == "POTENTIAL_RISK"
             for item in result.get("audit_plan", [])
         )
+        plan = result.get("audit_plan", [])
+        if plan:
+            lines.append("## Что делать дальше")
+            for index, item in enumerate(plan[:5], 1):
+                title = item.get("title", "Дополнительная проверка")
+                next_steps = [str(step) for step in item.get("next_steps", []) if step]
+                action = next_steps[0] if next_steps else item.get("rationale", "")
+                lines.append(f"{index}. **{title}.** {action}".strip())
         if potential_count:
+            risk_count = _counted(
+                potential_count, "потенциальный риск", "потенциальных риска", "потенциальных рисков"
+            )
             lines.append(
-                f"Потенциальных направлений для дополнительной проверки: {potential_count}."
+                f"План содержит {risk_count}. "
+                "Они не считаются нарушениями, пока дополнительная проверка не даст "
+                "достаточных доказательств."
             )
         errors = result.get("execution_errors", [])
         if errors:
-            lines.append(f"Ошибок выполнения: {len(errors)}. Подробности сохранены в отчёте.")
+            failed_checks = _counted(
+                len(errors), "проверку", "проверки", "проверок"
+            )
+            lines.extend([
+                "## Ограничения",
+                f"Во время анализа не удалось выполнить {failed_checks}. Поэтому итог нужно трактовать с учётом неполного покрытия; подробности сохранены в отчёте."
+            ])
         return "\n\n".join(lines)
