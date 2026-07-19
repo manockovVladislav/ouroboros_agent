@@ -8,6 +8,7 @@ from audit_insight_agent import developer_orchestrator as developer_module
 from audit_insight_agent.developer_orchestrator import OuroborosDeveloperOrchestrator
 from audit_insight_agent.ouroboros import OuroborosOrchestrator
 from audit_insight_agent.models import ApplicationSettings, OuroborosSettings
+from audit_insight_agent.report_generator import write_narrative_report
 from audit_insight_agent.ouroboros_tools import (
     generate_report,
     list_data_sources,
@@ -43,11 +44,54 @@ def test_public_api_lists_profiles_and_runs_one_rule(tmp_path, monkeypatch):
     assert all(item["verdict"] == "CONFIRMED" for item in result["finding_reviews"])
     report_path = Path(generate_report("RUN-API")["report_path"])
     report = report_path.read_text(encoding="utf-8")
+    assert report.startswith("# Аудиторское заключение\n\n## Главный вывод")
+    assert "## Ключевые основания" in report
+    assert "## Рекомендуемые действия" in report
+    assert report.index("## Главный вывод") < report.index("## Evidence critique")
     assert "## Evidence critique" in report
     assert "## Prioritized audit plan" in report
     if result["finding_reviews"]:
         assert "## Confirmed findings" in report
         assert "Document/location:" in report
+
+
+def test_judge_narrative_becomes_canonical_report_without_losing_appendix(tmp_path):
+    report_path = tmp_path / "report.md"
+    report_path.write_text(
+        "# Аудиторское заключение\n\n## Главный вывод\n\nЧерновик.\n\n"
+        "## Техническое приложение\n\n- Run ID: `RUN-1`\n",
+        encoding="utf-8",
+    )
+
+    write_narrative_report(
+        report_path,
+        "## Главный вывод\n\nПодтверждённых нарушений нет.\n\n"
+        "## Ключевые основания\n\nДоказательств недостаточно.\n"
+        "AUDIT_RUN_ID=RUN-1",
+    )
+    first = report_path.read_text(encoding="utf-8")
+    write_narrative_report(report_path, "## Главный вывод\n\nОбновлённый вывод.")
+    second = report_path.read_text(encoding="utf-8")
+
+    assert first.startswith("# Аудиторское заключение\n\n## Главный вывод")
+    assert "AUDIT_RUN_ID" not in first
+    assert second.count("## Техническое приложение") == 1
+    assert "Обновлённый вывод." in second
+    assert "Черновик." not in second
+    assert "- Run ID: `RUN-1`" in second
+
+
+def test_truncated_judge_response_does_not_replace_complete_report(tmp_path):
+    report_path = tmp_path / "report.md"
+    complete = "# Аудиторское заключение\n\n## Главный вывод\n\nПолный вывод.\n"
+    report_path.write_text(complete, encoding="utf-8")
+
+    write_narrative_report(
+        report_path,
+        "## Главный вывод\n\nОборванный ответ…[truncated]",
+    )
+
+    assert report_path.read_text(encoding="utf-8") == complete
 
 
 def test_web_answer_summary():

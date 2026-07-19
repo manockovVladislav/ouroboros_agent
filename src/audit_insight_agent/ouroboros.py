@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 
 from .config import load_application_settings
 from .models import AgentRunResult, ApplicationSettings
-from .report_generator import refresh_run_manifest_files
+from .report_generator import refresh_run_manifest_files, write_narrative_report
 from .run_logging import RunEventLogger, append_jsonl, utc_now, write_chat_history
 from .ouroboros_tools import (
     PROJECT_ROOT,
@@ -361,6 +361,10 @@ class OuroborosOrchestrator:
                 )
                 run_dir = Path(result["candidate_findings_path"]).parent
                 result["answer"] = self._answer(result)
+                report_path = write_narrative_report(
+                    result.get("report_path") or run_dir / "report.md",
+                    result["answer"],
+                )
                 chat_path = write_chat_history(
                     run_dir,
                     run_id=run_id,
@@ -374,6 +378,7 @@ class OuroborosOrchestrator:
                     task_id=task_id,
                     request_id=request_path.stem,
                     chat_path=str(chat_path),
+                    report_path=str(report_path),
                 )
                 if (run_dir / "run_manifest.json").is_file():
                     refresh_run_manifest_files(run_dir)
@@ -496,10 +501,12 @@ AUDIT_CLARIFICATION_REQUIRED. Не спрашивай о реплике, source_
 
 Не выбирай одну систему вместо других. Сразу выполни команду в workspace точно с таким argv:
 {json.dumps(command, ensure_ascii=False)}
-Команда запустит табличные правила, RAG по документам, профилирование и поиск зависимостей в данных. Она создаст evidence, candidate_findings.json, report.md, profiles.json, relationships.json, selected_rules.json и data_dependencies.json.
-После запуска изучи report.md, candidate_findings.json, profiles.json, relationships.json, selected_rules.json и data_dependencies.json. Для существенных или противоречивых сигналов прочитай также конфигурацию сработавшего правила и релевантный код его исполнения. Это разрешённое read-only исследование, а не изменение кода.
+Команда запустит табличные правила, RAG по документам, профилирование, поиск зависимостей и анализ бизнес-lineage. Она создаст evidence, candidate_findings.json, report.md, profiles.json, relationships.json, selected_rules.json, data_dependencies.json и business_analysis.json.
+После запуска изучи report.md, candidate_findings.json, profiles.json, relationships.json, selected_rules.json, data_dependencies.json и business_analysis.json. Для существенных или противоречивых сигналов прочитай также конфигурацию сработавшего правила и релевантный код его исполнения. Это разрешённое read-only исследование, а не изменение кода.
+Гипотезы из business_analysis.json и candidate_impact_paths используй для навигации по источникам. Они не доказывают причинность и не могут сами по себе повысить POTENTIAL_RISK до CONFIRMED.
 Перед тем как назвать сигнал нарушением, проверь: (1) покрывает ли словарь правила фактические значения; (2) подтверждены ли связи между источниками; (3) не спутана ли техническая воспроизводимость с семантической достоверностью. Никогда не объявляй нарушение CONFIRMED, если rule_applicability имеет статус PARTIAL или INCOMPATIBLE.
-После раздела Evidence critique напиши итог на русском языке по принципу пирамиды Минто, как в хорошем консалтинговом меморандуме. Начни с одного главного вывода и его значения для пользователя. Затем дай непересекающиеся обоснования в порядке важности и заверши конкретными действиями. Пиши связным текстом, понятным руководителю без технического контекста: не выводи служебные статусы, run_id, имена внутренних инструментов или пути к файлам. Не выдавай POTENTIAL_RISK за найденное нарушение. Для каждого CONFIRMED сообщи, что найдено, где и какой факт это подтверждает. Изложи ранжированный Prioritized audit plan как план действий, опираясь только на созданные артефакты.
+Весь ответ напиши на русском языке по принципу пирамиды Барбары Минто и уложи в 800 слов. Первая строка ответа — `## Главный вывод`; до неё запрещены Evidence critique, описание выполненных шагов и любые технические оговорки. В первом абзаце сразу ответь, что установлено, насколько вывод доказан и что это означает для аудитора. Затем используй разделы `## Ключевые основания`, `## Что это означает для аудита`, `## Рекомендуемые действия` и `## Ограничения и качество доказательств`. Аргументы должны быть непересекающимися, ранжированными по значимости и подтверждать главный вывод сверху вниз. Дай не более четырёх ключевых оснований и пяти действий. Сгруппируй однотипные сигналы: не повторяй десятки одинаковых карточек и не превращай заключение в журнал работы. Ответ обязан быть завершённым: не обрывай предложения и не пропускай обязательные разделы ради перечисления однотипных случаев.
+Пиши связным текстом, понятным руководителю без технического контекста: расшифровывай необходимые термины при первом употреблении, не выводи служебные статусы, run_id, имена внутренних инструментов или пути к файлам. Не выдавай POTENTIAL_RISK за найденное нарушение. Для каждого CONFIRMED сообщи, что найдено, где проявилось, какой независимый факт это подтверждает и каков эффект. Ранжированный план действий формулируй как решение: действие, ожидаемый результат и приоритет. Техническую оценку доказательств помести только в последний раздел и изложи человеческим языком.
 Отдельно оцени, не помешал ли
 системный пробел в общем коде, правилах, RAG или промптах. Не считай пробелом отсутствие нарушений или
 нехватку данных. Если общая возможность реального аудита отсутствовала, добавь строку:
@@ -639,6 +646,7 @@ AUDIT_IMPROVEMENT_NEEDED={{"reason":"краткое описание общег�
             "relationships",
             "selected_rules",
             "data_dependencies",
+            "business_analysis",
         ):
             artifact = run_dir / f"{name}.json"
             if artifact.is_file():

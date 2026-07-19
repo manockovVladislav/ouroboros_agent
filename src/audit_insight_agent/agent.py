@@ -6,6 +6,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .business_analyzer import analyze_business_logic, business_hypothesis_plan_items
 from .config import resolve_source_location
 from .data_loader import DuckDBTableStore, infer_table_format, is_database_source
 from .data_profiler import profile_table
@@ -19,6 +20,7 @@ from .models import (
     DataSource,
     RuleStatus,
     RunStatus,
+    Severity,
 )
 from .report_generator import refresh_run_manifest_files, write_run_outputs
 from .rule_engine import execute_rules
@@ -192,6 +194,15 @@ class AuditInsightAgent:
                 profiles,
                 runnable_rules,
             )
+            business_analysis = analyze_business_logic(
+                table_store,
+                profiles,
+                dependency_analysis,
+                [
+                    item.model_dump(mode="json")
+                    for item in workspace.relationships.relationships
+                ],
+            )
             rule_applicability = {
                 item["rule_id"]: item
                 for item in dependency_analysis["rule_applicability"]
@@ -228,6 +239,21 @@ class AuditInsightAgent:
             source_descriptors,
             rule_applicability,
         )
+        source_locations = {
+            item.source_id: item.relative_path for item in source_descriptors
+        }
+        audit_plan.extend(
+            business_hypothesis_plan_items(business_analysis, source_locations)
+        )
+        severity_order = {
+            Severity.CRITICAL: 0,
+            Severity.HIGH: 1,
+            Severity.MEDIUM: 2,
+            Severity.LOW: 3,
+        }
+        audit_plan.sort(
+            key=lambda item: (severity_order[item.priority], item.plan_id)
+        )
         completed_at = datetime.now(timezone.utc)
         result = AgentRunResult(
             run_id=actual_run_id,
@@ -254,6 +280,9 @@ class AuditInsightAgent:
                 "findings_count": len(findings),
                 "evidence_count": sum(len(item.evidence_ids) for item in rule_results),
                 "rule_applicability": dependency_analysis["rule_applicability"],
+                "business_hypotheses_count": len(
+                    business_analysis["semantic_hypotheses"]
+                ),
                 "duration_seconds": (completed_at - started_at).total_seconds(),
             },
         )
@@ -280,6 +309,10 @@ class AuditInsightAgent:
         paths["data_dependencies"] = _write_json(
             run_output_dir / "data_dependencies.json",
             dependency_analysis,
+        )
+        paths["business_analysis"] = _write_json(
+            run_output_dir / "business_analysis.json",
+            business_analysis,
         )
         refresh_run_manifest_files(run_output_dir)
         event_log.event(

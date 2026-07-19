@@ -44,12 +44,15 @@ def test_physical_currency_rules_run_on_discovered_workspace(tmp_path):
     assert paths["report"].exists()
     assert paths["discovered_sources"].exists()
     assert paths["profiles"].exists()
+    assert paths["data_dependencies"].exists()
+    assert paths["business_analysis"].exists()
     events_path = tmp_path / "RUN-INTEGRATION" / "events.jsonl"
     events = [json.loads(line) for line in events_path.read_text("utf-8").splitlines()]
     event_names = {event["event"] for event in events}
     assert {"audit_started", "rules_selected", "rule_completed"} <= event_names
     manifest = json.loads(paths["run_manifest"].read_text("utf-8"))
     assert manifest["files"]["events"] == "events.jsonl"
+    assert manifest["files"]["business_analysis"] == "business_analysis.json"
 
     reference = result.findings[0].evidence[0]
     stored = EvidenceStore(tmp_path / "RUN-INTEGRATION" / "evidence").get(

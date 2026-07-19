@@ -293,6 +293,7 @@ def _run_payload(result: AgentRunResult, paths: dict[str, Path]) -> dict[str, An
         "relationships",
         "selected_rules",
         "data_dependencies",
+        "business_analysis",
     ):
         if name in paths:
             payload[f"{name}_path"] = str(paths[name])

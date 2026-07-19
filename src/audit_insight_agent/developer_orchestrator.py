@@ -226,6 +226,7 @@ class OuroborosDeveloperOrchestrator:
             "execution_errors": list(audit_result.get("execution_errors") or [])[:20],
             "findings": findings,
             "data_dependencies_path": audit_result.get("data_dependencies_path"),
+            "business_analysis_path": audit_result.get("business_analysis_path"),
             "selected_rules_path": audit_result.get("selected_rules_path"),
             "profiles_path": audit_result.get("profiles_path"),
         }
@@ -236,7 +237,7 @@ class OuroborosDeveloperOrchestrator:
 Изучи код и артефакты цикла. Отдели нарушения в данных от недостатков
 самого агента: нехватающей общей функции, слабого правила, ошибки RAG,
 неточного промпта, неполной evidence-цепочки или непокрытого тестами сценария.
-Обязательно сопоставь находки с rule_id/check_id, конфигурацией правила, кодом его исполнения и data_dependencies.json. Не делай вывод о дефекте данных или кода только по массовости срабатываний.
+Обязательно сопоставь находки с rule_id/check_id, конфигурацией правила, кодом его исполнения, data_dependencies.json и business_analysis.json. Не делай вывод о дефекте данных или кода только по массовости срабатываний.
 Если нашёл обоснованный системный пробел — внеси минимальное универсальное
 изменение в код, правила, RAG или промпты и обязательно добавь или обнови тест.
 Если пробела нет, не создавай фиктивные правки: оставь worktree без изменений и объясни,
