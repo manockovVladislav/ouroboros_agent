@@ -160,6 +160,12 @@ def review_findings_and_build_plan(
             for item in finding.evidence
             if item.evidence_id and item.checksum and item.query
         ]
+        semantic_hypothesis = "semantic_constraint" in finding.tags
+        policy_evidence = [
+            item
+            for item in finding.evidence
+            if item.fields.get("semantic_constraint_match") is True
+        ]
         sources = sorted(
             {
                 source.strip()
@@ -185,10 +191,21 @@ def review_findings_and_build_plan(
             }
         )
         limitations = []
-        limitations.append(
-            "Правило подтверждает отклонение, но не доказывает заявленную первопричину; "
-            "её нужно проверять отдельно."
-        )
+        if semantic_hypothesis:
+            limitations.append(
+                "Статистическая редкость маршрута сама по себе не доказывает нарушение; "
+                "требуется нормативный критерий и проверка допустимых исключений."
+            )
+            if not policy_evidence:
+                limitations.append(
+                    "Не найдено нормативное подтверждение совместимости контекста "
+                    "с ожидаемыми свойствами целевой сущности."
+                )
+        else:
+            limitations.append(
+                "Правило подтверждает отклонение, но не доказывает заявленную "
+                "первопричину; её нужно проверять отдельно."
+            )
         if not source_locations:
             limitations.append(
                 "Точный путь к нормативному документу не привязан."
@@ -208,11 +225,23 @@ def review_findings_and_build_plan(
                 "Вывод не прошёл критику: нет воспроизводимой строки результата "
                 "с checksum и SQL-запросом."
             )
+        elif semantic_hypothesis and not policy_evidence:
+            verdict = "REQUIRES_VALIDATION"
+            rationale = (
+                "Нетипичный маршрут воспроизведён, но пока не связан с независимым "
+                "нормативным критерием; он остаётся существенной бизнес-гипотезой."
+            )
         elif finding.confidence < 0.75 or applicability.get("status") == "PARTIAL":
             verdict = "REQUIRES_VALIDATION"
             rationale = (
                 "Воспроизводимый сигнал есть, но уверенность или покрытие словаря недостаточны, "
                 "чтобы выдать его за подтверждённое нарушение."
+            )
+        elif semantic_hypothesis:
+            verdict = "CONFIRMED"
+            rationale = (
+                "Семантическое несоответствие подтверждено воспроизводимой строкой "
+                "маршрута и независимым нормативным критерием назначения цели."
             )
         else:
             verdict = "CONFIRMED"
@@ -229,6 +258,12 @@ def review_findings_and_build_plan(
                     f"Воспроизводимых табличных evidence: {len(table_evidence)}",
                     f"Всего ссылок на evidence: {len(finding.evidence)}",
                     f"Confidence: {finding.confidence:.2f}",
+                    (
+                        f"Нормативных подтверждений семантического ограничения: "
+                        f"{len(policy_evidence)}"
+                        if semantic_hypothesis
+                        else "Semantic constraint: not applicable"
+                    ),
                     (
                         "Rule vocabulary row coverage: "
                         f"{float(applicability['row_coverage']):.1%}"
@@ -258,11 +293,19 @@ def review_findings_and_build_plan(
                 finding_id=finding.finding_id,
                 sources=sources,
                 source_locations=source_locations,
-                next_steps=[
-                    "Повторить расчёт по SQL из evidence и сверить строку источника.",
-                    "Сопоставить факт с указанным критерием и документом.",
-                    "Отдельно подтвердить первопричину; не выводить её только из факта отклонения.",
-                ],
+                next_steps=(
+                    [
+                        "Выполнить reproduction query и сверить аномальный маршрут.",
+                        "Проверить допустимые исключения по нормативному документу или коду.",
+                        "Проследить тот же бизнес-объект по связанным операциям и измерить эффект.",
+                    ]
+                    if semantic_hypothesis
+                    else [
+                        "Повторить расчёт по SQL из evidence и сверить строку источника.",
+                        "Сопоставить факт с указанным критерием и документом.",
+                        "Отдельно подтвердить первопричину; не выводить её только из факта отклонения.",
+                    ]
+                ),
             )
         )
 

@@ -41,7 +41,16 @@ def test_public_api_lists_profiles_and_runs_one_rule(tmp_path, monkeypatch):
     assert [item["rule_id"] for item in result["rule_results"]] == ["OVP_LIMIT_EXCEEDED"]
     assert "finding_reviews" in result
     assert "audit_plan" in result
-    assert all(item["verdict"] == "CONFIRMED" for item in result["finding_reviews"])
+    ovp_finding_ids = {
+        item["finding_id"]
+        for item in result["findings"]
+        if item["check_id"] == "OVP_LIMIT_EXCEEDED"
+    }
+    assert all(
+        item["verdict"] == "CONFIRMED"
+        for item in result["finding_reviews"]
+        if item["finding_id"] in ovp_finding_ids
+    )
     report_path = Path(generate_report("RUN-API")["report_path"])
     report = report_path.read_text(encoding="utf-8")
     assert report.startswith("# Аудиторское заключение\n\n## Главный вывод")
@@ -50,7 +59,7 @@ def test_public_api_lists_profiles_and_runs_one_rule(tmp_path, monkeypatch):
     assert report.index("## Главный вывод") < report.index("## Evidence critique")
     assert "## Evidence critique" in report
     assert "## Prioritized audit plan" in report
-    if result["finding_reviews"]:
+    if any(item["verdict"] == "CONFIRMED" for item in result["finding_reviews"]):
         assert "## Confirmed findings" in report
         assert "Document/location:" in report
 
@@ -147,15 +156,8 @@ def test_gradio_interface_builds_without_starting_server():
         for component in config["components"]
         if component.get("type") in {"tab", "tabitem"}
     ]
-    mode_values = [
-        component.get("props", {}).get("value")
-        for component in config["components"]
-        if component.get("type") == "state"
-        and isinstance(component.get("props", {}).get("value"), bool)
-    ]
-
     assert tab_labels == ["Аудитор — быстрый", "Аудитор + разработчик"]
-    assert sorted(mode_values) == [False, True]
+    assert len(config["dependencies"]) == 4
 
 
 def test_web_orchestrator_uses_external_ouroboros_task_api(tmp_path):

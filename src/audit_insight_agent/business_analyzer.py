@@ -10,7 +10,16 @@ from typing import Any
 import pandas as pd
 
 from .data_loader import DuckDBTableStore, quote_identifier
-from .models import AuditPlanItem, DataProfile, Severity
+from .evidence_store import EvidenceStore, build_observation_evidence_record
+from .finding_builder import build_finding
+from .models import (
+    AuditPlanItem,
+    CandidateFinding,
+    DataProfile,
+    EvidenceReference,
+    FindingReview,
+    Severity,
+)
 
 
 _TARGET_MARKERS = {"destination", "target", "to"}
@@ -528,6 +537,222 @@ def analyze_business_logic(
     }
 
 
+def _hypothesis_object_id(hypothesis: dict[str, Any], sample: dict[str, Any]) -> str:
+    preferred = [
+        key
+        for key in sample
+        if key == "rule_id" or key.endswith("_rule_id")
+    ]
+    preferred.extend(
+        key
+        for key in ("mapping_target_key", "target_id", "object_id")
+        if key in sample
+    )
+    for key in preferred:
+        value = sample.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+    return str(hypothesis["hypothesis_id"])
+
+
+def _actual_target_attributes(
+    hypothesis: dict[str, Any], sample: dict[str, Any]
+) -> dict[str, Any]:
+    attributes = hypothesis.get("outlier_attributes") or {}
+    return {
+        str(attribute): sample.get("target_" + str(attribute))
+        for attribute in attributes
+    }
+
+
+def investigate_business_hypotheses(
+    *,
+    store: DuckDBTableStore,
+    analysis: dict[str, Any],
+    evidence_store: EvidenceStore,
+    run_id: str,
+    minimum_confidence: float = 0.8,
+) -> list[CandidateFinding]:
+    """Reproduce material hypotheses and promote them into reviewable findings."""
+
+    promoted: list[CandidateFinding] = []
+    for hypothesis in analysis.get("semantic_hypotheses", []):
+        confidence = float(hypothesis.get("confidence") or 0.0)
+        query = str(hypothesis.get("reproduction_query") or "").strip()
+        if confidence < minimum_confidence or not query:
+            hypothesis["investigation"] = {
+                "status": "BELOW_MATERIALITY_THRESHOLD",
+                "minimum_confidence": minimum_confidence,
+            }
+            continue
+        try:
+            reproduced = store.query(
+                f"SELECT * FROM ({query}) AS business_hypothesis_matches LIMIT 101"
+            )
+        except Exception as error:
+            hypothesis["investigation"] = {
+                "status": "ERROR",
+                "error": f"{type(error).__name__}: {error}",
+            }
+            continue
+        if reproduced.empty:
+            hypothesis["investigation"] = {
+                "status": "NOT_REPRODUCED",
+                "rows": 0,
+            }
+            continue
+
+        normalized_rows = [
+            {str(key): _json_value(value) for key, value in row.items()}
+            for row in reproduced.head(100).to_dict(orient="records")
+        ]
+        sample = normalized_rows[0]
+        object_id = _hypothesis_object_id(hypothesis, sample)
+        sources = [
+            str(hypothesis["mapping_source"]),
+            str(hypothesis["reference_source"]),
+        ]
+        check_id = "BUSINESS_SEMANTIC_CONSTRAINT"
+        evidence = build_observation_evidence_record(
+            run_id=run_id,
+            check_id=check_id,
+            source_ids=sources,
+            object_id=object_id,
+            query=query,
+            result={
+                "hypothesis_id": hypothesis["hypothesis_id"],
+                "reproduced_rows": len(reproduced),
+                "sample": sample,
+            },
+        )
+        evidence_store.save(evidence)
+        expected = hypothesis.get("expected_reference_value")
+        actual = _actual_target_attributes(hypothesis, sample)
+        context = dict(hypothesis.get("context") or {})
+        finding = build_finding(
+            check_id=check_id,
+            issue_type="semantic_target_mismatch",
+            primary_object_id=object_id,
+            title=f"Целевая сущность маршрута не соответствует его контексту: {object_id}",
+            summary=(
+                f"Воспроизведён нетипичный маршрут: для контекста {context!r} "
+                f"ожидаемые свойства цели {expected!r}, фактические — {actual!r}."
+            ),
+            root_cause=(
+                "Определение маршрута направляет операцию на сущность, свойства "
+                "которой отличаются от устойчивого контекста сопоставимых маршрутов."
+            ),
+            criterion=(
+                f"Для контекста {context!r} целевая сущность должна соответствовать "
+                f"свойствам {expected!r}; нормативное основание проверяется отдельно."
+            ),
+            risk=(
+                "Операция может быть отражена в неверном бизнес-классе и повлиять "
+                "на связанные остатки, отчётность или автоматические решения."
+            ),
+            severity=Severity.HIGH if confidence >= 0.9 else Severity.MEDIUM,
+            confidence=confidence,
+            evidence=[
+                EvidenceReference(
+                    evidence_id=evidence.evidence_id,
+                    checksum=evidence.checksum,
+                    source_name=", ".join(sources),
+                    object_id=object_id,
+                    description=(
+                        "Повторный read-only запрос воспроизвёл строку с "
+                        "семантически нетипичной целевой сущностью."
+                    ),
+                    fields={
+                        "hypothesis_id": hypothesis["hypothesis_id"],
+                        "context": context,
+                        "expected_target_attributes": expected,
+                        "actual_target_attributes": actual,
+                        "reproduced_rows": len(reproduced),
+                        "sample": sample,
+                    },
+                    query=query,
+                )
+            ],
+            recommendation=(
+                "Проверить маршрут по нормативному критерию, затем проследить тот "
+                "же бизнес-объект по связанным операциям и измерить последствия."
+            ),
+            object_id=object_id,
+            facts={
+                "hypothesis_id": hypothesis["hypothesis_id"],
+                "semantic_constraint": {
+                    "context": context,
+                    "expected": expected,
+                    "actual": actual,
+                },
+                "reproduced_rows": normalized_rows,
+                "candidate_impact_paths": hypothesis.get("candidate_impact_paths", []),
+            },
+            tags=[
+                "business_hypothesis",
+                "material_business_hypothesis",
+                "semantic_constraint",
+                "requires_policy_grounding",
+            ],
+        )
+        promoted.append(finding)
+        hypothesis["investigation"] = {
+            "status": "PROMOTED_TO_FINDING",
+            "rows": len(reproduced),
+            "finding_id": finding.finding_id,
+            "evidence_id": evidence.evidence_id,
+        }
+    return promoted
+
+
+def business_hypothesis_coverage(
+    findings: list[CandidateFinding],
+    reviews: list[FindingReview],
+    expected_hypothesis_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Describe whether every material hypothesis received an explicit verdict."""
+
+    review_by_id = {review.finding_id: review for review in reviews}
+    items = []
+    for finding in findings:
+        if "material_business_hypothesis" not in finding.tags:
+            continue
+        review = review_by_id.get(finding.finding_id)
+        items.append(
+            {
+                "hypothesis_id": finding.facts.get("hypothesis_id"),
+                "finding_id": finding.finding_id,
+                "verdict": review.verdict if review else "MISSING_REVIEW",
+            }
+        )
+    represented = {str(item["hypothesis_id"]) for item in items}
+    expected = set(expected_hypothesis_ids or represented)
+    for hypothesis_id in sorted(expected - represented):
+        items.append(
+            {
+                "hypothesis_id": hypothesis_id,
+                "finding_id": None,
+                "verdict": "MISSING_FINDING",
+            }
+        )
+    unresolved = [
+        item
+        for item in items
+        if item["verdict"]
+        in {"MISSING_FINDING", "MISSING_REVIEW", "REQUIRES_VALIDATION"}
+    ]
+    return {
+        "expected_hypothesis_ids": sorted(expected),
+        "material_hypotheses": items,
+        "material_hypotheses_count": len(items),
+        "unresolved_count": len(unresolved),
+        "complete": all(
+            item["verdict"] not in {"MISSING_FINDING", "MISSING_REVIEW"}
+            for item in items
+        ),
+    }
+
+
 def business_hypothesis_plan_items(
     analysis: dict[str, Any],
     source_locations: dict[str, str] | None = None,
@@ -537,6 +762,8 @@ def business_hypothesis_plan_items(
     locations = source_locations or {}
     result = []
     for hypothesis in analysis.get("semantic_hypotheses", []):
+        if (hypothesis.get("investigation") or {}).get("finding_id"):
+            continue
         mapping_source = str(hypothesis["mapping_source"])
         reference_source = str(hypothesis["reference_source"])
         sources = [mapping_source, reference_source]

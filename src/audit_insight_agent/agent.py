@@ -6,7 +6,12 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .business_analyzer import analyze_business_logic, business_hypothesis_plan_items
+from .business_analyzer import (
+    analyze_business_logic,
+    business_hypothesis_coverage,
+    business_hypothesis_plan_items,
+    investigate_business_hypotheses,
+)
 from .config import resolve_source_location
 from .data_loader import DuckDBTableStore, infer_table_format, is_database_source
 from .data_profiler import profile_table
@@ -203,6 +208,12 @@ class AuditInsightAgent:
                     for item in workspace.relationships.relationships
                 ],
             )
+            business_findings = investigate_business_hypotheses(
+                store=table_store,
+                analysis=business_analysis,
+                evidence_store=evidence_store,
+                run_id=actual_run_id,
+            )
             rule_applicability = {
                 item["rule_id"]: item
                 for item in dependency_analysis["rule_applicability"]
@@ -219,6 +230,7 @@ class AuditInsightAgent:
                 rule_applicability=rule_applicability,
             )
             findings, rule_results = execute_rules(runtime, runnable_rules)
+            findings.extend(business_findings)
 
         event_log.event(
             "rules_completed",
@@ -254,6 +266,15 @@ class AuditInsightAgent:
         audit_plan.sort(
             key=lambda item: (severity_order[item.priority], item.plan_id)
         )
+        hypothesis_coverage = business_hypothesis_coverage(
+            findings,
+            finding_reviews,
+            [
+                str(item["hypothesis_id"])
+                for item in business_analysis["semantic_hypotheses"]
+                if float(item.get("confidence") or 0.0) >= 0.8
+            ],
+        )
         completed_at = datetime.now(timezone.utc)
         result = AgentRunResult(
             run_id=actual_run_id,
@@ -283,6 +304,7 @@ class AuditInsightAgent:
                 "business_hypotheses_count": len(
                     business_analysis["semantic_hypotheses"]
                 ),
+                "business_hypothesis_coverage": hypothesis_coverage,
                 "duration_seconds": (completed_at - started_at).total_seconds(),
             },
         )

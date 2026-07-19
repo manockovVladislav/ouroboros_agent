@@ -4,11 +4,15 @@ import pandas as pd
 
 from audit_insight_agent.business_analyzer import (
     analyze_business_logic,
+    business_hypothesis_coverage,
     business_hypothesis_plan_items,
+    investigate_business_hypotheses,
 )
 from audit_insight_agent.data_loader import DuckDBTableStore
 from audit_insight_agent.data_profiler import profile_table
 from audit_insight_agent.dependency_analyzer import analyze_data_dependencies
+from audit_insight_agent.evidence_store import EvidenceStore
+from audit_insight_agent.finding_builder import review_findings_and_build_plan
 from audit_insight_agent.models import SourceConfig
 
 
@@ -28,7 +32,9 @@ def _source(name):
     )
 
 
-def test_business_analysis_finds_generic_target_attribute_mismatch_and_lineage():
+def test_business_analysis_finds_generic_target_attribute_mismatch_and_lineage(
+    tmp_path,
+):
     mapping_source = _source("routing_rules")
     reference_source = _source("account_reference")
     event_source = _source("processed_events")
@@ -81,6 +87,12 @@ def test_business_analysis_finds_generic_target_attribute_mismatch_and_lineage()
             (),
         )
         analysis = analyze_business_logic(store, profiles, dependencies, [])
+        promoted = investigate_business_hypotheses(
+            store=store,
+            analysis=analysis,
+            evidence_store=EvidenceStore(tmp_path / "evidence"),
+            run_id="RUN-NEUTRAL",
+        )
 
     hypotheses = analysis["semantic_hypotheses"]
     assert len(hypotheses) == 1
@@ -97,7 +109,28 @@ def test_business_analysis_finds_generic_target_attribute_mismatch_and_lineage()
         for path in hypothesis["candidate_impact_paths"]
     )
 
+    assert len(promoted) == 1
+    assert promoted[0].check_id == "BUSINESS_SEMANTIC_CONSTRAINT"
+    assert promoted[0].object_id == "R10"
+    assert promoted[0].facts["semantic_constraint"]["expected"] == "PHYSICAL"
+    assert promoted[0].facts["semantic_constraint"]["actual"] == {
+        "asset_class": "NON_CASH"
+    }
+    assert "material_business_hypothesis" in promoted[0].tags
+    assert analysis["semantic_hypotheses"][0]["investigation"]["finding_id"] == (
+        promoted[0].finding_id
+    )
+
+    reviews, _ = review_findings_and_build_plan(promoted, [])
+    assert reviews[0].verdict == "REQUIRES_VALIDATION"
+    coverage = business_hypothesis_coverage(promoted, reviews)
+    assert coverage["complete"] is True
+    assert coverage["unresolved_count"] == 1
+    missing_coverage = business_hypothesis_coverage(
+        [], [], [hypothesis["hypothesis_id"]]
+    )
+    assert missing_coverage["complete"] is False
+    assert missing_coverage["material_hypotheses"][0]["verdict"] == "MISSING_FINDING"
+
     plan = business_hypothesis_plan_items(analysis)
-    assert len(plan) == 1
-    assert plan[0].status == "POTENTIAL_RISK"
-    assert plan[0].finding_id is None
+    assert plan == []

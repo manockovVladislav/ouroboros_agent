@@ -90,6 +90,16 @@ def render_markdown_report(
     confirmed_findings.sort(
         key=lambda item: (severity_rank.get(item.severity.value, 9), -item.confidence)
     )
+    material_business_findings = [
+        finding
+        for finding in result.findings
+        if "material_business_hypothesis" in finding.tags
+    ]
+    regular_confirmed_findings = [
+        finding
+        for finding in confirmed_findings
+        if "material_business_hypothesis" not in finding.tags
+    ]
 
     lines: list[str] = ["# Аудиторское заключение", "", "## Главный вывод", ""]
     if confirmed_findings:
@@ -145,10 +155,51 @@ def render_markdown_report(
             "подтверждает расчёт, но само по себе не доказывает бизнес-нарушение "
             "или заявленную первопричину."
         )
+    hypothesis_coverage = result.metrics.get("business_hypothesis_coverage") or {}
+    if hypothesis_coverage and not hypothesis_coverage.get("complete", True):
+        lines.append(
+            "4. **Заключение не прошло контроль полноты.** Как минимум одна "
+            "существенная бизнес-гипотеза не преобразована в finding или не получила "
+            "независимый review; её нельзя молча исключать из итогового вывода."
+        )
 
-    if confirmed_findings:
+    if material_business_findings:
+        lines.extend(["", "## Существенные бизнес-аномалии", ""])
+        for index, finding in enumerate(material_business_findings, start=1):
+            review = review_by_id.get(finding.finding_id)
+            constraint = finding.facts.get("semantic_constraint") or {}
+            path_targets = sorted(
+                {
+                    str(source)
+                    for path in finding.facts.get("candidate_impact_paths", [])
+                    for source in path.get("sources", [])[1:]
+                }
+            )
+            lines.extend(
+                [
+                    f"### {index}. {finding.title}",
+                    "",
+                    f"**Статус доказательств.** {review.verdict if review else 'MISSING_REVIEW'}. "
+                    f"{review.rationale if review else 'Независимая оценка доказательств отсутствует.'}",
+                    "",
+                    f"**Ожидалось.** {constraint.get('expected')!r}",
+                    "",
+                    f"**Обнаружено.** {constraint.get('actual')!r}",
+                    "",
+                    f"**Контекст.** {constraint.get('context')!r}",
+                    "",
+                    (
+                        "**Куда проверять влияние.** " + ", ".join(path_targets[:8])
+                        if path_targets
+                        else "**Куда проверять влияние.** Связанные источники не определены."
+                    ),
+                    "",
+                ]
+            )
+
+    if regular_confirmed_findings:
         lines.extend(["", "## Подтверждённые наблюдения", ""])
-        for index, finding in enumerate(confirmed_findings, start=1):
+        for index, finding in enumerate(regular_confirmed_findings, start=1):
             evidence_summary = "; ".join(
                 reference.description for reference in finding.evidence[:2]
             )
