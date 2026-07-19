@@ -2,6 +2,8 @@
 
 Локальный прототип универсального аудиторского агента. Таблицы загружаются в DuckDB, документы индексируются BGE-M3 в Qdrant, правила формируют воспроизводимые evidence, `candidate_findings.json` и `report.md`.
 
+Полная пошаговая установка, подготовка входных архивов и порядок запуска описаны в [INSTALLATION.md](INSTALLATION.md).
+
 ## Архитектура
 
 ```text
@@ -86,10 +88,10 @@ Qdrant и Ouroboros — отдельные процессы. `scripts/run_web.py
 │  └─ runs/                    # артефакты по run_id
 ├─ logs/                            # ротируемый audit-insight.log
 ├─ .env.example
+├─ INSTALLATION.md
 ├─ .gitignore
 ├─ pyproject.toml
 ├─ requirements.txt
-├─ requirements.lock.txt
 └─ README.md
 ```
 

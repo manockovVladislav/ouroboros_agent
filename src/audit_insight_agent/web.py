@@ -277,6 +277,18 @@ def build_interface():
                 {},
             )
 
+    def clear_chat():
+        return (
+            [],
+            "## Ход работы\n\nАгент ожидает задачу.",
+            None,
+            None,
+            "",
+            {},
+            "",
+            {},
+        )
+
     with gr.Blocks(title="Audit Insight Agent") as interface:
         gr.HTML(
             "<style>.activity-panel {min-height: 220px; max-height: 420px; "
@@ -323,7 +335,9 @@ def build_interface():
                 placeholder="Проанализируй данные в data/ и документы в knowledge/",
                 lines=3,
             )
-            submit = gr.Button("Отправить", variant="primary")
+            with gr.Row():
+                submit = gr.Button("Отправить", variant="primary")
+                clear = gr.Button("Очистить чат", variant="secondary")
             status = gr.Markdown(
                 "## Ход работы\n\nАгент ожидает задачу.",
                 elem_classes=["activity-panel"],
@@ -344,8 +358,18 @@ def build_interface():
                 message,
                 active_request,
             ]
-            submit.click(respond, inputs=event_inputs, outputs=event_outputs)
-            message.submit(respond, inputs=event_inputs, outputs=event_outputs)
+            submit_event = submit.click(
+                respond, inputs=event_inputs, outputs=event_outputs
+            )
+            message_event = message.submit(
+                respond, inputs=event_inputs, outputs=event_outputs
+            )
+            clear.click(
+                clear_chat,
+                outputs=event_outputs,
+                cancels=[submit_event, message_event],
+                queue=False,
+            )
             interface.load(
                 restore,
                 inputs=[active_request, chatbot, pending_request, mode],
