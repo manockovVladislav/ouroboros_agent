@@ -153,6 +153,7 @@ class OuroborosOrchestrator:
 
     TERMINAL_STATUSES = {"completed", "failed", "cancelled", "error"}
     RUN_ID_PATTERN = re.compile(r"\bRUN-[A-Za-z0-9_.-]{1,76}\b")
+    REQUEST_ID_PATTERN = re.compile(r"REQ-[a-f0-9]{32}")
     CLARIFICATION_PREFIX = "AUDIT_CLARIFICATION_REQUIRED="
     IMPROVEMENT_PREFIX = "AUDIT_IMPROVEMENT_NEEDED="
     logger = logging.getLogger("audit_insight.ouroboros")
@@ -237,14 +238,96 @@ class OuroborosOrchestrator:
                 "**Анализ запущен.** Агент определяет доступные источники, "
                 "выполняет правила аудита и собирает доказательства для каждого вывода."
             ),
+            "request_id": request_path.stem,
+            "task_id": task_id,
         }
         deadline = time.monotonic() + self.settings.ouroboros.timeout_seconds
         previous_status = ""
         event_cursor = 0
         previous_progress = ""
         clarification_retry_used = False
+        connection_lost = False
+        last_keepalive = time.monotonic()
         while time.monotonic() < deadline:
-            task = self.client.get_task(task_id)
+            try:
+                task = self.client.get_task(task_id)
+            except OuroborosConnectionError as error:
+                recovered = self._recover_completed_audit(
+                    request_path=request_path,
+                    user_request=user_request,
+                    task_id=task_id,
+                )
+                if recovered is not None:
+                    append_jsonl(
+                        request_events,
+                        {
+                            "timestamp": utc_now(),
+                            "event": "audit_recovered_after_connection_loss",
+                            "request_id": request_path.stem,
+                            "task_id": task_id,
+                            "run_id": recovered["run_id"],
+                        },
+                    )
+                    yield {
+                        "kind": "status",
+                        "message": (
+                            "**Связь с сервером потеряна, но аудит восстановлен.** "
+                            "Расчёты и отчёт уже были сохранены; повторный запуск не требуется."
+                        ),
+                    }
+                    yield {"kind": "result", "result": recovered}
+                    return
+                if not connection_lost:
+                    self.logger.warning(
+                        "Ouroboros connection lost task_id=%s: %s", task_id, error
+                    )
+                    append_jsonl(
+                        request_events,
+                        {
+                            "timestamp": utc_now(),
+                            "event": "ouroboros_connection_lost",
+                            "request_id": request_path.stem,
+                            "task_id": task_id,
+                            "error": str(error),
+                        },
+                    )
+                    yield {
+                        "kind": "status",
+                        "message": (
+                            "**Связь с сервером временно потеряна.** Интерфейс "
+                            "сохраняет текущие результаты и продолжает попытки восстановления."
+                        ),
+                    }
+                    connection_lost = True
+                if time.monotonic() - last_keepalive >= 15:
+                    yield {
+                        "kind": "status",
+                        "message": (
+                            "**Продолжаю восстановление связи.** Интерфейс активен, "
+                            "расчёты не запускаются повторно."
+                        ),
+                    }
+                    last_keepalive = time.monotonic()
+                time.sleep(max(1.0, self.settings.ouroboros.poll_interval_seconds))
+                continue
+            if connection_lost:
+                append_jsonl(
+                    request_events,
+                    {
+                        "timestamp": utc_now(),
+                        "event": "ouroboros_connection_restored",
+                        "request_id": request_path.stem,
+                        "task_id": task_id,
+                    },
+                )
+                yield {
+                    "kind": "status",
+                    "message": (
+                        "**Связь с сервером восстановлена.** Продолжаю задачу "
+                        "с сохранённого состояния."
+                    ),
+                }
+                connection_lost = False
             status = str(task.get("status") or "unknown").lower()
             if status != previous_status:
                 append_jsonl(
@@ -278,6 +361,33 @@ class OuroborosOrchestrator:
                         previous_progress = progress
             if status in self.TERMINAL_STATUSES:
                 if status != "completed":
+                    recovered = self._recover_completed_audit(
+                        request_path=request_path,
+                        user_request=user_request,
+                        task_id=task_id,
+                    )
+                    if recovered is not None:
+                        append_jsonl(
+                            request_events,
+                            {
+                                "timestamp": utc_now(),
+                                "event": "audit_recovered_after_task_failure",
+                                "request_id": request_path.stem,
+                                "task_id": task_id,
+                                "task_status": status,
+                                "run_id": recovered["run_id"],
+                            },
+                        )
+                        yield {
+                            "kind": "status",
+                            "message": (
+                                "**Расчёты завершены и восстановлены.** Внешний "
+                                "агент потерял связь уже после сохранения аудита; "
+                                "повторный запуск не требуется."
+                            ),
+                        }
+                        yield {"kind": "result", "result": recovered}
+                        return
                     detail = task.get("error") or task.get("result") or "без описания"
                     self.logger.error(
                         "Ouroboros task failed task_id=%s status=%s detail=%s",
@@ -385,11 +495,156 @@ class OuroborosOrchestrator:
                 result["chat_path"] = str(chat_path)
                 yield {"kind": "result", "result": result}
                 return
+            if time.monotonic() - last_keepalive >= 15:
+                yield {
+                    "kind": "status",
+                    "message": (
+                        "**Анализ продолжается.** Соединение с интерфейсом "
+                        "активно; итоговый результат ещё не сформирован."
+                    ),
+                }
+                last_keepalive = time.monotonic()
             time.sleep(self.settings.ouroboros.poll_interval_seconds)
         raise TimeoutError(
             f"Ouroboros не завершил задачу {task_id} за "
             f"{self.settings.ouroboros.timeout_seconds} секунд"
         )
+
+    def recover_request_with_updates(
+        self, request_id: str
+    ) -> Iterator[dict[str, Any]]:
+        """Reattach a new browser session to a task created before a reload."""
+
+        request_id = str(request_id or "").strip()
+        if not self.REQUEST_ID_PATTERN.fullmatch(request_id):
+            raise ValueError("Некорректный request_id для восстановления")
+        request_path = PROJECT_ROOT / "outputs" / "requests" / f"{request_id}.json"
+        if not request_path.is_file():
+            raise FileNotFoundError("Сохранённый web-запрос не найден")
+        payload = json.loads(request_path.read_text(encoding="utf-8"))
+        user_request = str(payload.get("auditor_query") or "").strip()
+        task_id = self._saved_task_id(request_path)
+        if not user_request or not task_id:
+            raise RuntimeError("В сохранённом запросе нет данных для восстановления")
+
+        yield {
+            "kind": "status",
+            "message": (
+                "**Восстанавливаю активный анализ.** Страница была перезагружена, "
+                "но задача не запускается повторно; жду её сохранённый результат."
+            ),
+            "request_id": request_id,
+            "task_id": task_id,
+        }
+        deadline = time.monotonic() + self.settings.ouroboros.timeout_seconds
+        last_keepalive = time.monotonic()
+        while time.monotonic() < deadline:
+            recovered = self._recover_completed_audit(
+                request_path=request_path,
+                user_request=user_request,
+                task_id=task_id,
+            )
+            if recovered is not None:
+                append_jsonl(
+                    request_path.with_suffix(".events.jsonl"),
+                    {
+                        "timestamp": utc_now(),
+                        "event": "web_session_reattached",
+                        "request_id": request_id,
+                        "task_id": task_id,
+                        "run_id": recovered["run_id"],
+                    },
+                )
+                yield {"kind": "result", "result": recovered}
+                return
+            try:
+                task = self.client.get_task(task_id)
+            except OuroborosConnectionError:
+                task = {}
+            status = str(task.get("status") or "").lower()
+            if status in self.TERMINAL_STATUSES and status != "completed":
+                detail = task.get("error") or task.get("result") or "без описания"
+                raise RuntimeError(
+                    f"Задача Ouroboros завершилась как {status}: {detail}"
+                )
+            if time.monotonic() - last_keepalive >= 15:
+                yield {
+                    "kind": "status",
+                    "message": (
+                        "**Анализ продолжается.** Новая web-сессия подключена "
+                        "к прежней задаче и ждёт её результат."
+                    ),
+                    "request_id": request_id,
+                    "task_id": task_id,
+                }
+                last_keepalive = time.monotonic()
+            time.sleep(max(1.0, self.settings.ouroboros.poll_interval_seconds))
+        raise TimeoutError(
+            f"Не удалось восстановить результат задачи {task_id} за "
+            f"{self.settings.ouroboros.timeout_seconds} секунд"
+        )
+
+    @staticmethod
+    def _saved_task_id(request_path: Path) -> str:
+        events_path = request_path.with_suffix(".events.jsonl")
+        if not events_path.is_file():
+            return ""
+        task_id = ""
+        for line in events_path.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("event") == "ouroboros_task_created" and event.get("task_id"):
+                task_id = str(event["task_id"])
+        return task_id
+
+    def _recover_completed_audit(
+        self,
+        *,
+        request_path: Path,
+        user_request: str,
+        task_id: str,
+    ) -> dict[str, Any] | None:
+        sidecar = request_path.with_suffix(".result.json")
+        if not sidecar.is_file():
+            return None
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+            run_id = str(payload.get("run_id") or "")
+            if not self.RUN_ID_PATTERN.fullmatch(run_id):
+                return None
+            result = self.result_loader(run_id)
+        except (OSError, json.JSONDecodeError, KeyError, ValueError):
+            self.logger.exception(
+                "Could not recover completed audit request_id=%s", request_path.stem
+            )
+            return None
+        result["ouroboros_answer"] = ""
+        result["answer"] = self._answer(result)
+        result["improvement_needed"] = False
+        result["improvement_reason"] = ""
+        result["recovered_after_connection_loss"] = True
+        result["recovered_from_saved_result"] = True
+        run_dir = Path(result["candidate_findings_path"]).parent
+        chat_path = write_chat_history(
+            run_dir,
+            run_id=run_id,
+            task_id=task_id,
+            user_request=user_request,
+            ouroboros_answer=result["answer"],
+        )
+        RunEventLogger(run_dir, run_id).event(
+            "ouroboros_result_recovered",
+            task_id=task_id,
+            request_id=request_path.stem,
+            sidecar_path=str(sidecar),
+            chat_path=str(chat_path),
+        )
+        if (run_dir / "run_manifest.json").is_file():
+            refresh_run_manifest_files(run_dir)
+        result["chat_path"] = str(chat_path)
+        return result
 
     def _write_task_request(self, user_request: str) -> Path:
         request_root = PROJECT_ROOT / "outputs" / "requests"

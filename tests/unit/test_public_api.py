@@ -5,8 +5,12 @@ import pytest
 
 from audit_insight_agent.agent_system import AuditAgentSystem
 from audit_insight_agent import developer_orchestrator as developer_module
+from audit_insight_agent import ouroboros as ouroboros_module
 from audit_insight_agent.developer_orchestrator import OuroborosDeveloperOrchestrator
-from audit_insight_agent.ouroboros import OuroborosOrchestrator
+from audit_insight_agent.ouroboros import (
+    OuroborosConnectionError,
+    OuroborosOrchestrator,
+)
 from audit_insight_agent.models import ApplicationSettings, OuroborosSettings
 from audit_insight_agent.report_generator import write_narrative_report
 from audit_insight_agent.ouroboros_tools import (
@@ -157,7 +161,7 @@ def test_gradio_interface_builds_without_starting_server():
         if component.get("type") in {"tab", "tabitem"}
     ]
     assert tab_labels == ["Аудитор — быстрый", "Аудитор + разработчик"]
-    assert len(config["dependencies"]) == 4
+    assert len(config["dependencies"]) == 6
 
 
 def test_web_orchestrator_uses_external_ouroboros_task_api(tmp_path):
@@ -207,8 +211,222 @@ def test_web_orchestrator_uses_external_ouroboros_task_api(tmp_path):
     events = list(orchestrator.run_with_updates("Проверить"))
 
     assert events[-1]["result"]["run_id"] == "RUN-EXTERNAL"
+    started = next(event for event in events if event.get("request_id"))
+    assert started["request_id"].startswith("REQ-")
+    assert started["task_id"] == "task-1"
     assert "scripts/ouroboros_audit.py" in fake.description
     assert str(tmp_path / ".venv/bin/python") in fake.description
+
+
+def test_completed_audit_is_recovered_when_ouroboros_connection_is_lost(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(ouroboros_module, "PROJECT_ROOT", tmp_path)
+    run_dir = tmp_path / "outputs" / "runs" / "RUN-RECOVERED"
+    run_dir.mkdir(parents=True)
+    (run_dir / "report.md").write_text("# Recovered report\n", encoding="utf-8")
+
+    class FakeClient:
+        def health(self):
+            return {"ok": True}
+
+        def create_task(self, description, workspace, timeout_seconds):
+            return {"task_id": "task-recovery"}
+
+        def get_task(self, task_id):
+            request_path = next((tmp_path / "outputs" / "requests").glob("REQ-*.json"))
+            request_path.with_suffix(".result.json").write_text(
+                json.dumps(
+                    {
+                        "request_id": request_path.stem,
+                        "run_id": "RUN-RECOVERED",
+                        "status": "COMPLETED",
+                        "report_path": str(run_dir / "report.md"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            raise OuroborosConnectionError("connection lost")
+
+    loaded = {
+        "run_id": "RUN-RECOVERED",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(run_dir / "candidate_findings.json"),
+        "report_path": str(run_dir / "report.md"),
+    }
+    orchestrator = OuroborosOrchestrator(
+        settings=ApplicationSettings(
+            ouroboros=OuroborosSettings(
+                workspace=str(tmp_path),
+                timeout_seconds=10,
+                poll_interval_seconds=0.1,
+            )
+        ),
+        client=FakeClient(),
+        result_loader=lambda _run_id: dict(loaded),
+    )
+
+    events = list(orchestrator.run_with_updates("Проверить данные"))
+    result = events[-1]["result"]
+
+    assert result["run_id"] == "RUN-RECOVERED"
+    assert result["recovered_after_connection_loss"] is True
+    assert Path(result["chat_path"]).is_file()
+    assert any("аудит восстановлен" in event.get("message", "") for event in events)
+
+
+def test_completed_audit_is_recovered_when_outer_task_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(ouroboros_module, "PROJECT_ROOT", tmp_path)
+    run_dir = tmp_path / "outputs" / "runs" / "RUN-SAVED"
+    run_dir.mkdir(parents=True)
+
+    class FakeClient:
+        def health(self):
+            return {"ok": True}
+
+        def create_task(self, description, workspace, timeout_seconds):
+            return {"task_id": "task-saved"}
+
+        def get_task(self, task_id):
+            request_path = next((tmp_path / "outputs" / "requests").glob("REQ-*.json"))
+            request_path.with_suffix(".result.json").write_text(
+                json.dumps({"run_id": "RUN-SAVED", "status": "COMPLETED"}),
+                encoding="utf-8",
+            )
+            return {"status": "failed", "error": "provider disconnected"}
+
+    loaded = {
+        "run_id": "RUN-SAVED",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(run_dir / "candidate_findings.json"),
+        "report_path": str(run_dir / "report.md"),
+    }
+    events = list(
+        OuroborosOrchestrator(
+            settings=ApplicationSettings(
+                ouroboros=OuroborosSettings(
+                    workspace=str(tmp_path),
+                    timeout_seconds=10,
+                    poll_interval_seconds=0.1,
+                )
+            ),
+            client=FakeClient(),
+            result_loader=lambda _run_id: dict(loaded),
+        ).run_with_updates("Проверить данные")
+    )
+
+    assert events[-1]["result"]["run_id"] == "RUN-SAVED"
+    assert events[-1]["result"]["recovered_from_saved_result"] is True
+    assert any("Расчёты завершены" in event.get("message", "") for event in events)
+
+
+def test_browser_session_can_reattach_to_saved_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(ouroboros_module, "PROJECT_ROOT", tmp_path)
+    request_id = "REQ-" + "a" * 32
+    request_root = tmp_path / "outputs" / "requests"
+    request_root.mkdir(parents=True)
+    request_path = request_root / f"{request_id}.json"
+    request_path.write_text(
+        json.dumps({"request_id": request_id, "auditor_query": "Проверить"}),
+        encoding="utf-8",
+    )
+    request_path.with_suffix(".events.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "ouroboros_task_created",
+                "request_id": request_id,
+                "task_id": "task-before-reload",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    request_path.with_suffix(".result.json").write_text(
+        json.dumps({"run_id": "RUN-REATTACHED", "status": "COMPLETED"}),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "outputs" / "runs" / "RUN-REATTACHED"
+    run_dir.mkdir(parents=True)
+    loaded = {
+        "run_id": "RUN-REATTACHED",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(run_dir / "candidate_findings.json"),
+        "report_path": str(run_dir / "report.md"),
+    }
+    orchestrator = OuroborosOrchestrator(
+        settings=ApplicationSettings(
+            ouroboros=OuroborosSettings(workspace=str(tmp_path))
+        ),
+        client=object(),
+        result_loader=lambda _run_id: dict(loaded),
+    )
+
+    events = list(orchestrator.recover_request_with_updates(request_id))
+
+    assert events[0]["task_id"] == "task-before-reload"
+    assert events[-1]["result"]["run_id"] == "RUN-REATTACHED"
+
+
+def test_orchestrator_retries_a_temporary_connection_loss(tmp_path, monkeypatch):
+    monkeypatch.setattr(ouroboros_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(ouroboros_module.time, "sleep", lambda _seconds: None)
+
+    class FakeClient:
+        polls = 0
+
+        def health(self):
+            return {"ok": True}
+
+        def create_task(self, description, workspace, timeout_seconds):
+            return {"task_id": "task-retry"}
+
+        def get_task(self, task_id):
+            self.polls += 1
+            if self.polls == 1:
+                raise OuroborosConnectionError("temporary outage")
+            return {"status": "completed", "result": "AUDIT_RUN_ID=RUN-RETRY"}
+
+    run_dir = tmp_path / "RUN-RETRY"
+    loaded = {
+        "run_id": "RUN-RETRY",
+        "status": "COMPLETED",
+        "findings": [],
+        "finding_reviews": [],
+        "audit_plan": [],
+        "execution_errors": [],
+        "candidate_findings_path": str(run_dir / "candidate_findings.json"),
+        "report_path": str(run_dir / "report.md"),
+    }
+    events = list(
+        OuroborosOrchestrator(
+            settings=ApplicationSettings(
+                ouroboros=OuroborosSettings(
+                    workspace=str(tmp_path),
+                    timeout_seconds=10,
+                    poll_interval_seconds=0.1,
+                )
+            ),
+            client=FakeClient(),
+            result_loader=lambda _run_id: dict(loaded),
+        ).run_with_updates("Проверить данные")
+    )
+
+    messages = [event.get("message", "") for event in events]
+    assert any("временно потеряна" in message for message in messages)
+    assert any("восстановлена" in message for message in messages)
+    assert events[-1]["result"]["run_id"] == "RUN-RETRY"
 
 
 def test_developer_orchestrator_uses_isolated_worktree_without_merge(
